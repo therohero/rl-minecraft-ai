@@ -21,6 +21,7 @@
 //! sent in the `Hello`.
 
 use crate::config::{cfg, SimConfig};
+use crate::effects::EFFECT_COUNT;
 use crate::kit::{HOTBAR_ACTION_DIM, HOTBAR_SLOTS, ITEM_COUNT};
 use serde::{Deserialize, Serialize};
 
@@ -103,7 +104,10 @@ impl From<[f32; 10]> for Action {
 ///     action head is rescaled by the larger `max_look_delta` (3.0). A v6
 ///     policy would decode a v7 stream without erroring and silently
 ///     regress - hence the bump.
-pub const WIRE_VERSION: u8 = 8;
+/// v9: splash potions - 5 new `kit::Item`s (widening `inventory` and the
+///     `held_slot` hotkey action) and a new `self_effects` block (one float
+///     per `effects::Effect`, `amplifier + 1` while active, else 0).
+pub const WIRE_VERSION: u8 = 9;
 
 pub const MSG_HELLO_REQ: u8 = 1;
 pub const MSG_HELLO_RESP: u8 = 2;
@@ -115,8 +119,11 @@ pub const MAX_PAYLOAD: usize = 60_000;
 
 pub const ACTION_FLOATS_PER_SLOT: usize = 10;
 
-/// Fixed leading "self" fields of a wire observation row.
-pub const OBS_SELF_FLOATS: usize = 27;
+/// Fixed leading "self" fields of a wire observation row (the 27 scalars in
+/// `write_wire` plus the `self_effects` block).
+pub const OBS_SELF_FLOATS: usize = 27 + OBS_EFFECT_FLOATS;
+/// One float per `effects::Effect`: `amplifier + 1` while active, else 0.
+pub const OBS_EFFECT_FLOATS: usize = EFFECT_COUNT;
 /// Per-item inventory counts (all `kit::Item`s except `Empty`).
 pub const OBS_INVENTORY_FLOATS: usize = ITEM_COUNT - 1;
 /// The `Item` id sitting in each physical hotbar slot.
@@ -258,6 +265,11 @@ pub struct Observation {
     /// mining). `uhc` only - always 0 for the other kits.
     pub self_mining: f32,
 
+    /// One float per `effects::Effect` in discriminant order: `amplifier + 1`
+    /// while that effect is active, else 0. All zero unless a config hands
+    /// out splash potions.
+    pub self_effects: Vec<f32>,
+
     /// Per-item counts held (all `kit::Item`s except `Empty`, in order),
     /// so the policy can learn which items it can actually switch to.
     pub inventory: Vec<f32>,
@@ -319,6 +331,8 @@ impl Observation {
             self.self_sneaking,
             self.self_mining,
         ]);
+        debug_assert_eq!(self.self_effects.len(), OBS_EFFECT_FLOATS);
+        out.extend_from_slice(&self.self_effects);
         debug_assert_eq!(self.inventory.len(), OBS_INVENTORY_FLOATS);
         out.extend_from_slice(&self.inventory);
         debug_assert_eq!(self.hotbar.len(), OBS_HOTBAR_FLOATS);
@@ -398,6 +412,8 @@ pub struct Hello {
     /// Held-slot categorical action head width (`kit::HOTBAR_ACTION_DIM` =
     /// `HOTBAR_SLOTS` selects + `ITEM_COUNT` hotkeys).
     pub hotbar_action_dim: usize,
+    /// Width of the `self_effects` observation block (`effects::EFFECT_COUNT`).
+    pub effect_count: usize,
     pub obs_floats_per_slot: usize,
     pub action_floats_per_slot: usize,
     pub tick_dt: f32,

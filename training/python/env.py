@@ -39,7 +39,7 @@ from logging_setup import get_logger
 log = get_logger(__name__)
 
 # --- wire framing: keep in lockstep with sim/src/protocol.rs ---
-WIRE_VERSION = 8
+WIRE_VERSION = 9
 MSG_HELLO_REQ = 1
 MSG_HELLO_RESP = 2
 MSG_ACTION = 3
@@ -167,6 +167,12 @@ class SelfPlayArenaEnv:
             raise RuntimeError(
                 f"sim reports hotbar_action_dim={hotbar_action_dim} but features.py has "
                 f"{features.HOTBAR_ACTION_DIM} - kit.rs and features.py are out of sync"
+            )
+        effect_count = hello.get("effect_count", features.EFFECT_COUNT)
+        if effect_count != features.EFFECT_COUNT:
+            raise RuntimeError(
+                f"sim reports effect_count={effect_count} but features.py has "
+                f"{features.EFFECT_COUNT} - effects.rs and features.py are out of sync"
             )
 
         features.configure(

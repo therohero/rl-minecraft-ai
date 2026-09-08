@@ -78,6 +78,7 @@ pub fn run(port: u16, num_arenas: usize, seed: Option<u64>) -> std::io::Result<(
         item_count: crate::kit::ITEM_COUNT,
         hotbar_slots: crate::kit::HOTBAR_SLOTS,
         hotbar_action_dim: crate::kit::HOTBAR_ACTION_DIM,
+        effect_count: crate::effects::EFFECT_COUNT,
         obs_floats_per_slot: obs_floats,
         action_floats_per_slot: ACTION_FLOATS_PER_SLOT,
         tick_dt: DT,

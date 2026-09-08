@@ -171,6 +171,7 @@ pub(crate) fn build(arena: &Arena, me_idx: usize, ev: StepEvents) -> Observation
         self_slot: me.slot as f32,
         self_swap_lockout: (me.swap_lockout / swap_lockout_max).clamp(0.0, 1.0),
         self_mining: me.mining_progress.clamp(0.0, 1.0),
+        self_effects: me.effects.levels().to_vec(),
         inventory,
         hotbar,
         enemies: fill(&enemies, cfg().max_observed_enemies),

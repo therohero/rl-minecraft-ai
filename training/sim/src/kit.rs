@@ -6,7 +6,7 @@
 //! usize`; selecting an item the kit doesn't have, or one whose count has
 //! run out, is ignored (the held item stays put).
 
-use crate::config::Kit;
+use crate::config::{cfg, Kit};
 
 /// Every item type. The discriminant order is load-bearing: it's the
 /// categorical action index and the observation's `held` id.
@@ -25,11 +25,19 @@ pub enum Item {
     LavaBucket = 9,
     GoldenApple = 10,
     GoldenHead = 11,
+    // Splash potions. No kit carries these by default - they're opt-in via
+    // `SimConfig::splash_potions`. Thrown with `use_item`; on impact they
+    // apply a status effect in a radius (see `projectile`, `effects`).
+    SplashHealing = 12,
+    SplashHarming = 13,
+    SplashPoison = 14,
+    SplashSpeed = 15,
+    SplashStrength = 16,
 }
 
 /// Number of `Item` variants - width of the per-player count array and the
 /// `inventory` observation block.
-pub const ITEM_COUNT: usize = 12;
+pub const ITEM_COUNT: usize = 17;
 
 /// Physical hotbar slots (vanilla: keys 1-9).
 pub const HOTBAR_SLOTS: usize = 9;
@@ -56,6 +64,11 @@ impl Item {
             9 => Item::LavaBucket,
             10 => Item::GoldenApple,
             11 => Item::GoldenHead,
+            12 => Item::SplashHealing,
+            13 => Item::SplashHarming,
+            14 => Item::SplashPoison,
+            15 => Item::SplashSpeed,
+            16 => Item::SplashStrength,
             _ => Item::Empty,
         }
     }
@@ -77,6 +90,17 @@ impl Item {
 
     pub fn is_food(self) -> bool {
         matches!(self, Item::GoldenApple | Item::GoldenHead)
+    }
+
+    pub fn is_splash_potion(self) -> bool {
+        matches!(
+            self,
+            Item::SplashHealing
+                | Item::SplashHarming
+                | Item::SplashPoison
+                | Item::SplashSpeed
+                | Item::SplashStrength
+        )
     }
 }
 
@@ -215,6 +239,16 @@ pub fn loadout(kit: Kit) -> Loadout {
             l.protection_epf = 4.0 * 3.0;
         }
     }
+    // Splash potions are never part of a kit's default loadout - a config
+    // opts into them. They land in `counts` (reachable by the policy's
+    // number-key "hotkey" action) but take no fixed hotbar slot.
+    let sp = &cfg().splash_potions;
+    l.counts[Item::SplashHealing.index()] = sp.healing;
+    l.counts[Item::SplashHarming.index()] = sp.harming;
+    l.counts[Item::SplashPoison.index()] = sp.poison;
+    l.counts[Item::SplashSpeed.index()] = sp.speed;
+    l.counts[Item::SplashStrength.index()] = sp.strength;
+
     l.default_held = l.hotbar[l.default_slot];
     l
 }

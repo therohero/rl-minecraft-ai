@@ -26,6 +26,7 @@ mod blocks;
 mod collision;
 mod combat;
 mod config;
+mod effects;
 mod kit;
 mod observation;
 mod physics;

@@ -22,7 +22,10 @@ CONTINUOUS_ACTION_DIM = 4
 # Binary actions: jump, attack, sprint, use_item, sneak
 BINARY_ACTION_DIM = 5
 # Item types (must match kit.rs) - width of the `inventory` observation block.
-ITEM_COUNT = 12
+ITEM_COUNT = 17
+# Status-effect types (must match effects.rs::EFFECT_COUNT) - width of the
+# `self_effects` observation block.
+EFFECT_COUNT = 9
 # Physical hotbar slots (must match kit.rs::HOTBAR_SLOTS) - width of the
 # `hotbar` observation block.
 HOTBAR_SLOTS = 9
@@ -33,14 +36,13 @@ HOTBAR_ACTION_DIM = HOTBAR_SLOTS + ITEM_COUNT
 # One action row on the wire: 4 continuous + 5 binary + 1 held-slot index.
 ACTION_FLOATS_PER_SLOT = 10
 
-# --- wire observation layout (must match sim/src/protocol.rs, WIRE_VERSION 8) ---
-# v8 adds one self float, self_mining (0..1 break progress on the block the
-# uhc pickaxe is aimed at; 0 otherwise). v7 kept every field and width; its
-# terrain fields (self_ground_height, self_slope_*, per-other ground_height,
-# block_view.top_rel) are integer voxel block tops, self_hurt counts down
-# over 1.0 s, and other players / arrows are observed with the observer's
-# ping of latency.
-OBS_SELF_FLOATS = 27
+# --- wire observation layout (must match sim/src/protocol.rs, WIRE_VERSION 9) ---
+# v9 adds the `self_effects` block (one float per effects.rs::Effect,
+# amplifier + 1 while active, else 0) right after self_mining, and widens the
+# `inventory` block by the 5 new splash-potion items. v8 added self_mining.
+OBS_SELF_SCALARS = 27  # the fixed self scalars before the effects block
+OBS_EFFECT_FLOATS = EFFECT_COUNT
+OBS_SELF_FLOATS = OBS_SELF_SCALARS + OBS_EFFECT_FLOATS
 OBS_INVENTORY_FLOATS = ITEM_COUNT - 1
 OBS_HOTBAR_FLOATS = HOTBAR_SLOTS
 OBS_OTHER_FLOATS = 13
@@ -52,6 +54,7 @@ OBS_EVENT_FLOATS = 7
 _ARROW_NORM = 16.0
 _COUNT_NORM = 16.0  # inventory counts are clamped to this then normalized
 _FOOD_NORM = 20.0  # self_food is 0..20
+_EFFECT_NORM = 4.0  # self_effects carry `amplifier + 1` (1..~3)
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,14 @@ def _blockcol_row(col) -> list:
     )
 
 
+def _effects_row(eff) -> list:
+    """The `self_effects` block: one float per effect, `amplifier + 1` while
+    active (else 0), normalized."""
+    e = list(eff or [])
+    e = e[:OBS_EFFECT_FLOATS] + [0.0] * (OBS_EFFECT_FLOATS - len(e))
+    return [float(x) / _EFFECT_NORM for x in e]
+
+
 def _inventory_row(inv) -> list:
     inv = list(inv or [])
     inv = inv[:OBS_INVENTORY_FLOATS] + [0.0] * (OBS_INVENTORY_FLOATS - len(inv))
@@ -274,6 +285,7 @@ def observation_to_row(obs: dict) -> list:
         obs.get("self_sneaking", 0.0),
         obs.get("self_mining", 0.0),
     ]
+    row += _effects_row(obs.get("self_effects"))
     row += _inventory_row(obs.get("inventory"))
     row += _hotbar_row(obs.get("hotbar"))
 
@@ -334,7 +346,11 @@ def wire_batch_to_obs(raw: np.ndarray) -> np.ndarray:
     out[:, 26] = raw[:, 24] / _FOOD_NORM  # self_food
     out[:, 27] = raw[:, 25]  # self_sneaking
     out[:, 28] = raw[:, 26]  # self_mining
-    w = 29
+    # self_effects block: passes through, normalized.
+    out[:, 29 : 29 + OBS_EFFECT_FLOATS] = (
+        raw[:, OBS_SELF_SCALARS : OBS_SELF_SCALARS + OBS_EFFECT_FLOATS] / _EFFECT_NORM
+    )
+    w = 29 + OBS_EFFECT_FLOATS
     r = OBS_SELF_FLOATS
 
     # inventory

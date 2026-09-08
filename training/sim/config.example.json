@@ -112,7 +112,28 @@
     "water_velocity_multiplier": 0.5,
     "lava_damage_rate": 4.0,
     "lava_burn_seconds": 5.0,
-    "lava_burn_rate": 1.0
+    "lava_burn_rate": 1.0,
+    "splash_potion_speed": 0.5,
+    "splash_potion_gravity": 0.05,
+    "splash_potion_drag": 0.99,
+    "splash_radius": 4.0,
+    "potion_speed_seconds": 30.0,
+    "potion_strength_seconds": 30.0,
+    "potion_poison_seconds": 11.0,
+    "potion_speed_amplifier": 1,
+    "potion_strength_amplifier": 0,
+    "potion_poison_amplifier": 0,
+    "potion_healing_amplifier": 1,
+    "potion_harming_amplifier": 0,
+    "instant_health_hp": 4.0,
+    "instant_damage_hp": 6.0
+  },
+  "splash_potions": {
+    "healing": 0,
+    "harming": 0,
+    "poison": 0,
+    "speed": 0,
+    "strength": 0
   },
   "reward": {
     "per_hp_dealt": 1.0,

@@ -1,5 +1,8 @@
 package rl.minecraft.ai.client.combat;
 
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.PotionContentsComponent;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 
@@ -22,7 +25,12 @@ public enum KitItem {
     WATER_BUCKET,
     LAVA_BUCKET,
     GOLDEN_APPLE,
-    GOLDEN_HEAD;
+    GOLDEN_HEAD,
+    SPLASH_HEALING,
+    SPLASH_HARMING,
+    SPLASH_POISON,
+    SPLASH_SPEED,
+    SPLASH_STRENGTH;
 
     /** Number of real inventory item categories (everything except EMPTY). */
     public static final int COUNT = values().length - 1;
@@ -51,6 +59,22 @@ public enum KitItem {
         if (stack.isOf(Items.LAVA_BUCKET)) return LAVA_BUCKET;
         if (stack.isOf(Items.GOLDEN_APPLE)) return GOLDEN_APPLE;
         if (stack.isOf(Items.ENCHANTED_GOLDEN_APPLE)) return GOLDEN_HEAD;
+        if (stack.isOf(Items.SPLASH_POTION)) return splashKind(stack);
+        return EMPTY;
+    }
+
+    /** The splash potion this stack is, by its primary effect, or EMPTY. */
+    private static KitItem splashKind(ItemStack stack) {
+        PotionContentsComponent contents = stack.get(DataComponentTypes.POTION_CONTENTS);
+        if (contents == null) return EMPTY;
+        for (var e : contents.getEffects()) {
+            var t = e.getEffectType();
+            if (t == StatusEffects.INSTANT_HEALTH) return SPLASH_HEALING;
+            if (t == StatusEffects.INSTANT_DAMAGE) return SPLASH_HARMING;
+            if (t == StatusEffects.POISON) return SPLASH_POISON;
+            if (t == StatusEffects.SPEED) return SPLASH_SPEED;
+            if (t == StatusEffects.STRENGTH) return SPLASH_STRENGTH;
+        }
         return EMPTY;
     }
 

@@ -9,8 +9,12 @@ import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffect;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.projectile.PersistentProjectileEntity;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.FluidTags;
@@ -97,6 +101,21 @@ public final class ObservationBuilder {
         o.addProperty("self_mining", client.interactionManager != null && client.interactionManager.isBreakingBlock() ? 1.0 : 0.0);
         o.addProperty("self_sneaking", self.isSneaking() ? 1.0 : 0.0);
         o.addProperty("self_food", self.getHungerManager().getFoodLevel());
+
+        // self_effects: one entry per effects.rs::Effect, in that order;
+        // amplifier + 1 while active, else 0. The two instant effects never
+        // persist, so they're always 0.
+        JsonArray eff = new JsonArray();
+        eff.add(effLevel(self, StatusEffects.SPEED));
+        eff.add(effLevel(self, StatusEffects.SLOWNESS));
+        eff.add(effLevel(self, StatusEffects.STRENGTH));
+        eff.add(effLevel(self, StatusEffects.WEAKNESS));
+        eff.add(effLevel(self, StatusEffects.REGENERATION));
+        eff.add(effLevel(self, StatusEffects.POISON));
+        eff.add(0.0); // instant_health
+        eff.add(0.0); // instant_damage
+        eff.add(effLevel(self, StatusEffects.FIRE_RESISTANCE));
+        o.add("self_effects", eff);
 
         // --- inventory counts + hotbar layout + arrows + selected slot ---
         int hotbarSlots = spec.hotbarSlots;
@@ -290,5 +309,11 @@ public final class ObservationBuilder {
 
     private static double clamp01(double v) {
         return MathHelper.clamp(v, 0.0, 1.0);
+    }
+
+    /** {@code amplifier + 1} if {@code effect} is active on the player, else 0. */
+    private static double effLevel(ClientPlayerEntity self, RegistryEntry<StatusEffect> effect) {
+        StatusEffectInstance i = self.getStatusEffect(effect);
+        return i == null ? 0.0 : i.getAmplifier() + 1.0;
     }
 }

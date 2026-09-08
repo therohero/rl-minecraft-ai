@@ -139,7 +139,7 @@ use tracker::{Relation, Tracker};
 const HOTBAR_SLOTS: usize = 9;
 /// Width of the `inventory` observation block - all `kit::Item`s except
 /// `Empty` (`sim/src/kit.rs::ITEM_COUNT - 1`).
-const INVENTORY_ITEMS: usize = 11;
+const INVENTORY_ITEMS: usize = 16;
 
 /// Sim/normalisation constants the observation build needs. Defaults mirror
 /// `SimConfig::default()`; the real values for the loaded policy are fetched
@@ -446,8 +446,13 @@ pub(crate) struct Observation {
     self_swap_lockout: f64,
     /// Block-break progress 0..1 (the sim's `uhc` pickaxe mining). This bot
     /// doesn't mine, so it always reports 0; the field exists to keep the
-    /// wire row the same width as `sim/src/protocol.rs` (WIRE_VERSION 8).
+    /// wire row the same width as `sim/src/protocol.rs`.
     self_mining: f64,
+    /// One float per `effects::Effect` (Speed, Slowness, Strength, Weakness,
+    /// Regeneration, Poison, InstantHealth, InstantDamage, FireResistance):
+    /// `amplifier + 1` while active, else 0. The two instant effects never
+    /// persist so they're always 0.
+    self_effects: Vec<f64>,
     /// Per-item counts (order = spec.json `inventory_items`).
     inventory: Vec<f64>,
     /// The `kit::Item` id in each physical hotbar slot (this server's kit).
@@ -863,6 +868,7 @@ fn build_observation(bot: &Client, state: &State) -> Option<Observation> {
         self_slot: selected_slot as f64,
         self_swap_lockout: t_swap_lockout,
         self_mining: 0.0,
+        self_effects: read_effects(bot),
         inventory,
         hotbar,
         enemies,
@@ -892,6 +898,11 @@ enum Item {
     LavaBucket = 9,
     GoldenApple = 10,
     GoldenHead = 11,
+    SplashHealing = 12,
+    SplashHarming = 13,
+    SplashPoison = 14,
+    SplashSpeed = 15,
+    SplashStrength = 16,
 }
 
 impl Item {
@@ -908,6 +919,11 @@ impl Item {
             9 => Item::LavaBucket,
             10 => Item::GoldenApple,
             11 => Item::GoldenHead,
+            12 => Item::SplashHealing,
+            13 => Item::SplashHarming,
+            14 => Item::SplashPoison,
+            15 => Item::SplashSpeed,
+            16 => Item::SplashStrength,
             _ => Item::Empty,
         }
     }
@@ -956,7 +972,32 @@ fn is_arrow_item(kind: ItemKind) -> bool {
     matches!(kind, ItemKind::Arrow | ItemKind::SpectralArrow | ItemKind::TippedArrow)
 }
 
-/// Reads the live inventory: `(inventory counts[11], hotbar layout[9],
+/// The `self_effects` block: `amplifier + 1` per `effects::Effect` in order
+/// (Speed, Slowness, Strength, Weakness, Regeneration, Poison, InstantHealth,
+/// InstantDamage, FireResistance), else 0. Instant effects never persist.
+fn read_effects(bot: &Client) -> Vec<f64> {
+    use azalea::registry::builtin::MobEffect;
+    let active = bot.get_component::<azalea::entity::ActiveEffects>();
+    let lvl = |e: MobEffect| -> f64 {
+        active
+            .as_ref()
+            .and_then(|a| a.get_level(e))
+            .map_or(0.0, |amp| amp as f64 + 1.0)
+    };
+    vec![
+        lvl(MobEffect::Speed),
+        lvl(MobEffect::Slowness),
+        lvl(MobEffect::Strength),
+        lvl(MobEffect::Weakness),
+        lvl(MobEffect::Regeneration),
+        lvl(MobEffect::Poison),
+        0.0, // instant_health
+        0.0, // instant_damage
+        lvl(MobEffect::FireResistance),
+    ]
+}
+
+/// Reads the live inventory: `(inventory counts, hotbar layout[9],
 /// total arrows, selected slot, held item id)`.
 fn read_inventory(bot: &Client) -> (Vec<f64>, Vec<f64>, u32, usize, usize) {
     let mut counts = vec![0.0f64; INVENTORY_ITEMS];
