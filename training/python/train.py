@@ -173,11 +173,9 @@ def resolve_num_arenas(explicit: int | None, rollout_len: int, max_ram: str | No
     return _log_estimate(num_arenas)
 
 
-def resolve_sim_config(args) -> str | None:
-    """Merges `--sim-config <file>` (if any) with the individual
-    `--arena-radius` / `--reward-*` / ... override flags and, if the result
-    is non-empty, writes it to a temp JSON file whose path is returned for
-    the sim's `--config`. Returns None if there is nothing to override."""
+def merge_sim_config(args) -> dict:
+    """The `--sim-config <file>` contents (if any) merged with the individual
+    `--arena-radius` / `--reward-*` / ... override flags. May be empty."""
     config: dict = {}
     if args.sim_config:
         with open(args.sim_config) as f:
@@ -200,15 +198,60 @@ def resolve_sim_config(args) -> str | None:
         config["natural_regen"] = args.natural_regen
     if args.input_order is not None:
         config["input_order"] = args.input_order
+    return config
 
+
+def write_sim_config(config: dict) -> str | None:
+    """Writes `config` to a temp JSON file for the sim's `--config`, or
+    returns None if it's empty (the sim then uses its own defaults)."""
     if not config:
         return None
-
     fd, path = tempfile.mkstemp(prefix="sim_config_", suffix=".json")
     with os.fdopen(fd, "w") as f:
         json.dump(config, f, indent=2)
     log.info("resolved sim config -> %s: %s", path, config)
     return path
+
+
+def resolve_sim_config(args) -> str | None:
+    return write_sim_config(merge_sim_config(args))
+
+
+class TerrainCurriculum:
+    """Ramps the sim's `terrain_max_amplitude` from `start` up to the config
+    target over the first `updates` PPO updates, in `stages` discrete steps.
+    Each step is a fast sim relaunch (the model / optimizer stay in memory),
+    so the policy learns flat movement first and only meets rough terrain
+    once it can walk.
+    """
+
+    def __init__(self, base_config: dict, updates: int, start: float, stages: int):
+        self.base = base_config
+        self.target = float(base_config.get("terrain_max_amplitude", 3.0))
+        self.updates = max(int(updates), 0)
+        self.start = max(float(start), 0.0)
+        self.stages = max(int(stages), 1)
+        self.active = self.updates > 0 and self.start < self.target
+
+    # Below this the terrain is treated as flat (`terrain_flat_only`), and no
+    # amplitude the sim / observation ever sees drops under it (a 0 would
+    # divide-by-zero the observation's amplitude normalization).
+    _FLAT_THRESHOLD = 0.3
+
+    def amplitude_for(self, update: int) -> float:
+        if not self.active or update >= self.updates:
+            return self.target
+        frac = max(update - 1, 0) / max(self.updates, 1)
+        step = min(int(frac * self.stages), self.stages - 1)
+        raw = self.start + (self.target - self.start) * step / max(self.stages - 1, 1)
+        return max(raw, self._FLAT_THRESHOLD)
+
+    def config_for(self, update: int) -> tuple[dict, float]:
+        amp = self.amplitude_for(update)
+        cfg = {**self.base, "terrain_max_amplitude": amp}
+        if amp <= self._FLAT_THRESHOLD:
+            cfg["terrain_flat_only"] = True
+        return cfg, amp
 
 
 def build_actions(act_out: dict, num_slots: int) -> np.ndarray:
@@ -443,6 +486,20 @@ def main():
     sim.add_argument("--match-time", type=float, default=None, help="match_time_seconds")
     sim.add_argument("--terrain-max-amplitude", type=float, default=None)
     sim.add_argument("--terrain-flat-only", action="store_true", help="force every arena flat")
+    sim.add_argument(
+        "--terrain-curriculum-updates",
+        type=int,
+        default=0,
+        help="ramp terrain_max_amplitude from --terrain-curriculum-start up to the target (the "
+        "sim config's terrain_max_amplitude, 3.0 by default) over the first N PPO updates, in "
+        "--terrain-curriculum-stages discrete steps - each a fast sim relaunch (model/optimizer "
+        "stay in memory). 0 = off (constant amplitude). Resuming a checkpoint past update N just "
+        "trains at the full amplitude.",
+    )
+    sim.add_argument("--terrain-curriculum-start", type=float, default=0.0,
+                     help="amplitude the curriculum starts flat-ish at (default 0.0 = flat).")
+    sim.add_argument("--terrain-curriculum-stages", type=int, default=5,
+                     help="number of discrete amplitude steps (sim relaunches) across the ramp.")
     sim.add_argument("--max-look-delta", type=float, default=None, help="per-step yaw/pitch clamp (radians)")
     sim.add_argument("--reward-per-hp-dealt", type=float, default=None)
     sim.add_argument("--reward-per-hp-taken", type=float, default=None)
@@ -656,7 +713,21 @@ def main():
         "" if cpu_threaded_update else " (not switched: GPU or same count)",
     )
 
-    sim_config_path = resolve_sim_config(args)
+    curriculum = TerrainCurriculum(
+        merge_sim_config(args),
+        args.terrain_curriculum_updates,
+        args.terrain_curriculum_start,
+        args.terrain_curriculum_stages,
+    )
+    # `start_update` isn't known until after the checkpoint check below, so
+    # start from the config for update 1 and let the loop correct it.
+    curr_cfg, curr_amp = curriculum.config_for(1)
+    sim_config_path = write_sim_config(curr_cfg)
+    if curriculum.active:
+        log.info(
+            "terrain curriculum: amplitude %.2f -> %.2f over the first %d updates in %d step(s)",
+            curriculum.start, curriculum.target, curriculum.updates, curriculum.stages,
+        )
 
     csv_path = (
         os.path.join(args.checkpoint_dir, "metrics.csv") if args.metrics_csv == "AUTO" else args.metrics_csv
@@ -672,14 +743,17 @@ def main():
     optimizer = None
     last_update_completed = 0
     last_saved_update = 0
-    try:
-        env = SelfPlayArenaEnv(
+    def make_env(config_path):
+        return SelfPlayArenaEnv(
             num_arenas=args.num_arenas,
             port=args.port,
             sim_binary=args.sim_binary,
-            sim_config_path=sim_config_path,
+            sim_config_path=config_path,
             seed=args.sim_seed if args.sim_seed is not None else args.seed,
         )
+
+    try:
+        env = make_env(sim_config_path)
         num_slots = env.num_slots
         # features.OBS_DIM is only final after env's handshake calls
         # features.configure() (it depends on the sim's team-observation
@@ -824,6 +898,32 @@ def main():
 
         for update in range(start_update, args.total_updates + 1):
             buffer.reset()
+
+            # Terrain curriculum: when this update's amplitude step differs
+            # from the running sim's, relaunch the sim at the new amplitude.
+            # The model / optimizer / buffer / opponent pool are untouched.
+            if curriculum.active:
+                next_cfg, next_amp = curriculum.config_for(update)
+                if abs(next_amp - curr_amp) > 1e-9:
+                    log.info("terrain curriculum: amplitude %.2f -> %.2f at update %d (sim relaunch)",
+                             curr_amp, next_amp, update)
+                    env.close()
+                    if sim_config_path and os.path.isfile(sim_config_path):
+                        os.unlink(sim_config_path)
+                    time.sleep(0.2)  # let the UDP port free
+                    sim_config_path = write_sim_config(next_cfg)
+                    env = make_env(sim_config_path)
+                    assert env.num_slots == num_slots and features.OBS_DIM * frame_stack == obs_dim, (
+                        "the terrain curriculum must not change the observation/action shape"
+                    )
+                    curr_amp = next_amp
+                    cur_obs_np = env.reset()
+                    if args.obs_noise > 0.0:
+                        cur_obs_np = cur_obs_np + opp_rng.normal(
+                            0.0, args.obs_noise, cur_obs_np.shape
+                        ).astype(np.float32)
+                    obs = torch.as_tensor(stacker.reset(cur_obs_np) if stacker else cur_obs_np)
+                    episode_return[:] = 0.0
 
             # Pick this iteration's opponent (shared by every opponent arena).
             if opp_idx.size:
@@ -986,6 +1086,7 @@ def main():
                         "clip_frac": stats["clip_frac"],
                         "entropy_coef": entropy_coef,
                         "lr": lr_now,
+                        "terrain_amplitude": curr_amp,
                     })
 
                 recent_returns.clear()

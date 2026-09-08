@@ -210,11 +210,23 @@ the candidate checkpoint. The live inference bridges (`azalea-bot`, `mod`)
 build a single frame and don't stack yet, so `export_model.py` refuses an
 `N>1` checkpoint - train the deployable policy with `--frame-stack 1`.
 
+### Terrain curriculum
+
+`--terrain-curriculum-updates N` ramps the sim's `terrain_max_amplitude`
+from `--terrain-curriculum-start` (default 0 = flat) up to the target over
+the first `N` PPO updates, in `--terrain-curriculum-stages` discrete steps.
+Each step is a fast sim relaunch — the model, optimizer, rollout buffer and
+opponent pool stay in memory — so the policy learns flat movement first and
+only meets rough terrain once it can walk. Off by default (constant
+amplitude); resuming a checkpoint past update `N` just trains at the full
+amplitude.
+
 ### Metrics
 
 The progress line (every `--log-every` updates, default 10) carries the
 rolling return, win rate, `win_vs_scripted`, the PPO losses, entropy,
-approximate KL and clip fraction, plus steps/sec. `--metrics-csv [path]`
+approximate KL and clip fraction, the terrain amplitude, plus steps/sec.
+`--metrics-csv [path]`
 also writes those as a CSV (one row per line, appended under the existing
 header on resume; no extra dependency); `--tensorboard [dir]` mirrors them
 to a TensorBoard event dir when the `tensorboard` package is installed (a
