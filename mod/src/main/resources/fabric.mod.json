@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"id": "rl-minecraft-ai",
+	"version": "${version}",
+	"name": "RL Minecraft AI",
+	"description": "Client-side /fight command: fights the nearest player with the trained RL policy (served by azalea-bot/inference_server.py), and /fight train records live episodes as a dataset, tagged with the auto-detected kit (uhc / sword / axe, default sword).",
+	"authors": [
+		"rl-minecraft-ai"
+	],
+	"contact": {},
+	"license": "CC0-1.0",
+	"icon": "assets/rl-minecraft-ai/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"rl.minecraft.ai.RlMinecraftAi"
+		],
+		"client": [
+			"rl.minecraft.ai.client.RlMinecraftAiClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}

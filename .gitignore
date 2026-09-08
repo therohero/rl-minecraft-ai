@@ -1,0 +1,15 @@
+/training/sim/target/
+/training/checkpoints/*.pt
+/azalea-bot/model/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.log
+/azalea-bot/azalea_bot/target/
+/azalea-bot/viaproxy/
+/mod/build/
+/mod/bin/
+/mod/.gradle/
+/mod/run/
+/training/datasets/

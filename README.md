@@ -1,0 +1,232 @@
+# rl-minecraft-ai
+
+A reinforcement-learning Minecraft PvP bot: train a policy by self-play in a
+fast headless Rust sim, then run it against a real Minecraft server.
+
+## Layout
+
+The repo is split into three top-level folders:
+
+| folder | what it is |
+|---|---|
+| [`training/`](training/) | the RL training pipeline. [`training/sim/`](training/sim/README.md) is the headless Rust PvP simulation backend; `training/python/` is the PPO self-play trainer, feature engineering, opponent league, and model export. Checkpoints land in `training/checkpoints/`. |
+| [`azalea-bot/`](azalea-bot/README.md) | the seam between a trained checkpoint and a live game: `inference_server.py` serves the exported policy over localhost HTTP, and `azalea_bot/` is a ready-made Rust Minecraft client (via the `azalea` crate) that drives the bot on a real server, with off-the-tick inference and a client-side legality guard. |
+| [`mod/`](mod/README.md) | a client-side **Fabric mod** (MC 1.21.11). `/fight` takes over and fights the nearest player with the trained policy (via `azalea-bot/inference_server.py`); `/fight train` also records the fight as a dataset, tagged with the kit auto-detected from your inventory (uhc / sword / axe, default sword). |
+
+## Quickstart
+
+**1. Train** (builds the Rust sim, sets up `.venv/`, runs self-play; `Ctrl+C`
+stops it after saving `training/checkpoints/latest.pt`):
+
+```bash
+./run.sh                 # bash (Linux/macOS/WSL/Git Bash)
+.\run.ps1                # native Windows PowerShell
+```
+
+**2. Serve the trained model**, then play the bot one of two ways:
+
+- **as a Fabric mod in your own client** - start the model server, then
+  launch Minecraft with [`mod/`](mod/README.md) and type `/fight`
+  (or `/fight train`):
+
+  ```bash
+  ./run_bot_mod.sh         # export latest checkpoint + serve on 127.0.0.1:8800
+  .\run_bot_mod.ps1
+  ```
+
+- **as a headless bot** on a server:
+
+  ```bash
+  ./run_bot.sh  [ip] [port] [username] [inference_url] [mc_version]
+  .\run_bot.ps1 [ip] [port] [username] [inference_url] [mc_version] [auth]
+  ```
+
+  The `run_bot` scripts export + start the inference server themselves (or
+  reuse one already up), then build and run `azalea_bot`. See
+  [`azalea-bot/README.md`](azalea-bot/README.md) for auth and other-version
+  (ViaProxy) details.
+
+**3. (optional) Fine-tune on live fights.** `/fight train` in the mod records
+each fight to `rl-datasets/`. Fold that back into the policy:
+
+```bash
+./run_train_mod.sh [dataset_dir]    # advantage-weighted offline update -> latest.pt
+./run_bot_mod.sh                    # re-export + serve the updated model
+```
+
+## Requirements
+
+Rust (via [rustup](https://rustup.rs)) and Python 3.10+. `run.sh` / `run.ps1`
+build the sim, create the repo-local `.venv/`, and install the Python deps
+into it - nothing touches your global environment.
+
+**GPU is optional and auto-detected.** The dependency step
+(`training/python/ensure_deps.py`, called by every `run*` script) picks the
+`torch` wheel that matches the machine: the CUDA build if an NVIDIA GPU is
+visible (`nvidia-smi` or `/proc/driver/nvidia`), otherwise the slim
+CPU-only build (~200 MB vs ~3.5 GB). It also *re-syncs* on later runs - move
+the repo to a GPU box and the next `./run.sh` swaps in the CUDA wheel;
+move it back and it swaps in the CPU one and frees the space. Force a
+choice with `RL_TORCH_BACKEND=cpu` or `=cuda`. The trainer / inference
+server still pick the actual compute device at runtime (`--device auto` by
+default - CUDA/ROCm, Apple MPS, Intel XPU, DirectML, else CPU; see
+`training/python/device.py`); for a non-NVIDIA accelerator install the
+matching wheel yourself per `training/python/requirements.txt`.
+
+## Architecture
+
+Three processes, two very different transports, one shared feature
+definition.
+
+```
+                    TRAIN                                     PLAY LIVE
+  ┌───────────────────────────────────┐         ┌──────────────────────────────────┐
+  │  train.py (PPO, self-play)        │         │  inference_server.py             │
+  │    │  actions  [N·10] f32          │         │    loads model/policy.pt         │
+  │    ▼          UDP :9999 (binary)   │         │    POST /act  (HTTP + JSON)      │
+  │  mc_pvp_sim (Rust sim, N arenas)  │         │      ▲                 │ action   │
+  │    │  observations [N·W] f32       │         │      │ observation    ▼          │
+  │    ▼                               │         │  azalea_bot  /  mod's /fight     │
+  │  RolloutBuffer ─► GAE ─► update    │         │    (real Minecraft client)      │
+  │    │                               │         │      │ guard ─► client API      │
+  │    ▼  every --checkpoint-every     │         │      ▼                           │
+  │  training/checkpoints/latest.pt ───┼────────►│  export_model.py ─► model/*     │
+  └───────────────────────────────────┘         └──────────────────────────────────┘
+```
+
+- **`training/sim/`** (`mc_pvp_sim`) is a headless, wall-clock-uncoupled
+  reimplementation of just enough *vanilla* Minecraft PvP to train against:
+  vanilla per-tick movement/collision on a voxel world, raycast melee with
+  the vanilla two-step (client picks off its latency-stale view, server
+  re-validates reach), the 1.0 s i-frame window, shields, sweep, bows,
+  three kits, placeable blocks + flowing fluids, hunger, and simulated
+  network latency as a domain-randomization knob. It runs `N` arenas in
+  parallel across CPU cores (rayon) and steps as fast as the trainer feeds
+  it actions. Full detail in [`training/sim/README.md`](training/sim/README.md).
+
+- **`training/python/`** launches the sim as a subprocess, speaks the
+  binary-over-UDP protocol (`env.py`), and trains **one shared policy**
+  (`ppo_agent.py`) that controls *every* player slot on *both* teams in
+  *every* arena. Because every observation is built relative to "self" and
+  the nearest teammates/enemies (`features.py`, mirroring
+  `sim/src/observation.rs`), shared-policy control *is* self-play - no
+  separate opponent process. An opponent league (`opponents.py`) mixes in
+  frozen past snapshots and a fixed scripted bot for a fraction of arenas
+  so training doesn't converge to something only a mirror of itself can't
+  punish.
+
+- **`azalea-bot/`** is the live seam. `export_model.py` turns a checkpoint
+  into a portable `model/policy.pt` (TorchScript) + `model/spec.json` (the
+  exact obs/action field order and the sim constants that run trained
+  against). `inference_server.py` loads those and serves `POST /act` +
+  `GET /spec` over HTTP+JSON so a bot in any language can drive the policy.
+  `azalea_bot/` is a reference client: it builds the trained observation
+  from live game state every tick, runs inference **off the tick loop**,
+  and passes every action through a **client-side legality guard** before
+  it reaches the wire.
+
+- **`mod/`** is a second consumer of that same HTTP seam - a Fabric client
+  mod whose `/fight` command does what `azalea_bot` does but from inside a
+  real vanilla client, and whose `/fight train` records `(observation,
+  action)` JSONL for the offline fine-tune loop.
+
+### The observation, in four places
+
+The feature vector the policy sees must be byte-identical wherever it's
+built. It is defined in four files that have to stay in lockstep:
+
+| file | role |
+|---|---|
+| `training/sim/src/observation.rs` | the source of truth - builds the wire `Observation` from arena state |
+| `training/python/features.py` | decodes that wire row into the policy input (and `observation_to_row` does the same from a dict, for the mod dataset) |
+| `azalea-bot/azalea_bot/src/main.rs` (`build_observation`) | reconstructs the same fields from live `azalea` client state |
+| `mod/src/client/java/rl/minecraft/ai/client/obs/ObservationBuilder.java` | the Java port of `build_observation` for the Fabric mod |
+
+`sim/src/protocol.rs::WIRE_VERSION` is bumped on any incompatible layout
+change; `env.py` carries the matching constant and the sim drops datagrams
+whose version doesn't match. The `Hello` handshake sends every
+normalization constant and the full resolved `SimConfig`, so the Python
+side never hand-copies a value, and `spec.json` carries the same set
+downstream to the live bots.
+
+### One training update, end to end
+
+1. **Rollout** (`--rollout-len` steps, default 128). Each step: the CPU
+   `collect_model` samples an action for all `2·num_arenas` slots
+   (`ActorCritic.act` - plain tensor ops, not `torch.distributions`, on the
+   tiny per-step batch), `build_actions` packs them into the `[N, 10]` f32
+   wire array, opponent-controlled slots are overwritten with the league
+   opponent's actions, `env.step` sends the batch over UDP and reads the
+   state batch back, and the transition is appended to the on-CPU
+   `RolloutBuffer`.
+2. **GAE** over the filled buffer (`compute_gae`, γ/λ), then a bulk transfer
+   of the whole buffer to the training device (a no-op on CPU; on GPU this
+   is the *only* host↔device transfer per update - collection stays on CPU
+   because a per-step `.cpu()` sync would dwarf a network this small).
+3. **PPO update** (`--ppo-epochs`, default 2): shuffle, split into
+   `--minibatch-size` chunks, clipped surrogate + value loss + annealed
+   entropy bonus, global grad-norm clip. Opponent slots are masked out
+   (`sample_mask`) so the policy never trains toward imitating a frozen
+   snapshot or the scripted bot. LR and entropy coef are linearly annealed
+   over `--total-updates`.
+4. Sync `collect_model` from the updated weights; every
+   `--opponent-snapshot-every` updates, freeze a snapshot into the league
+   pool.
+
+The rollout is latency-bound (one UDP round-trip per step), so it runs on
+few torch threads (`--torch-threads`); the update is a big batched matmul
+the sim sits idle through, so it grabs most cores (`--update-threads`), and
+the loop flips between the two counts. `--num-arenas` auto-scales from the
+detected CPU count (~12/thread, clamped) since the rollout buffer's RAM
+grows linearly with it.
+
+### Checkpoint lifecycle
+
+`_save_checkpoint` writes both `latest.pt` (the auto-resume point, via a
+temp-file + atomic rename) and a numbered `policy_update_<n>.pt` history
+file, pruning to `--keep-checkpoints`. A checkpoint also gets written once
+on **any** exit - normal finish, `Ctrl+C`, or crash (with `SIGINT` ignored
+for that critical section so an impatient second `Ctrl+C` can't corrupt
+it). Re-running `./run.sh` with the same command resumes from `latest.pt`
+(model + optimizer state + update count); `--fresh` wipes everything. A
+checkpoint stores the trunk shape, `obs_dim`, the sim constants it trained
+against, and the full `SimConfig` - resuming refuses to load if the
+architecture or observation space no longer matches.
+
+### Two transports, on purpose
+
+| link | transport | why |
+|---|---|---|
+| `train.py` ↔ `mc_pvp_sim` | flat little-endian `f32` batches over **UDP** on loopback, 10-byte framed, strict request/response with a seq number and cached-reply retransmit | millions of steps against one fixed peer - JSON-encoding thousands of small floats per step was a measurable slice of the loop, and TCP's ack/Nagle/head-of-line buys nothing on loopback |
+| live bot ↔ `inference_server.py` | **HTTP + JSON**, `POST /act` / `GET /spec` | ~20 Hz against an arbitrary-language client - reach and correctness matter far more than microseconds; measured ~1 ms median round-trip, well inside a 50 ms tick, and `azalea_bot` runs inference off the tick loop anyway |
+
+### The live legality guard
+
+The policy trains in a sim that is vanilla-*shaped*, not vanilla-*exact*,
+so its raw output can be physically impossible for a real client (a
+170°/tick aim snap, an attack six blocks away or through a wall, a
+machine-gun click rate, a mid-air jump). A modern anticheat flags exactly
+those. Both live bridges rewrite every action to stay inside what a legit
+vanilla client can do - rotation rate-limited, low-pass smoothed,
+sub-degree tremor, snapped to the vanilla 0.15° mouse grid; attacks only
+when a hitbox is genuinely under the crosshair (reach + line of sight +
+aim settled) at a randomised human click cadence; illegal sprint/jump
+dropped; crouch debounced. It's geometry, rate-limiting and humanisation
+only - it never invents inputs. `azalea_bot`'s is `src/guard.rs` (every
+knob has an `AZALEA_GUARD_*` override); the mod's is `ClientGuard.java`
+(lighter, since a real client already enforces jump-on-ground, real hunger
+cost and the real attack cooldown for free). Details in each sub-README.
+
+## Tests
+
+```bash
+pytest                          # Python trainer / feature tests
+cd training/sim && cargo test   # Rust sim tests
+cd azalea-bot/azalea_bot && cargo test   # live bridge: guard geometry, config
+cd mod && ./gradlew build       # Fabric client mod
+```
+
+The `pytest` suite cross-checks the inference bridge's per-observation
+decode (`features.observation_to_row`) against training's vectorized one
+(`wire_batch_to_obs`) so the two never drift, and checks that
+`ActorCritic.evaluate` reproduces the log-probs `ActorCritic.act` sampled.

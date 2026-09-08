@@ -1,0 +1,35 @@
+[package]
+name = "azalea_bot"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE: requires the nightly Rust toolchain - see rust-toolchain.toml.
+# Azalea's NBT dependency (`simdnbt`) currently uses unstable features
+# (`portable_simd`, `allocator_api`) that are not available on stable Rust.
+# This is an upstream constraint of the azalea crate, not something this
+# project can avoid while depending on it.
+
+[dependencies]
+# Pin azalea to the release whose wire protocol matches your target server's
+# Minecraft version (the crate version's "+mcX.Y.Z" build tag tells you which -
+# check `cargo info azalea` for what's published). Tracking the git repo's
+# main branch instead makes the bot speak whatever bleeding-edge snapshot
+# protocol azalea's HEAD currently targets - see the note at the top of
+# src/main.rs for what a version mismatch here looks like in-game.
+# `default-features = false` drops only azalea's `log` feature, which would
+# otherwise add bevy's `LogPlugin` and fight this bot's own `env_logger` for
+# the global logger ("Could not set global logger as it is already set").
+azalea = { version = "0.15.1", default-features = false, features = ["serde", "packet-event", "online-mode"] } # +mc1.21.11
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+eyre = "0.6"
+# Tiny, dependency-free PRNG for the guard's aim / click humanisation
+# (already in the tree via azalea).
+fastrand = "2"
+
+[profile.release]
+opt-level = 2

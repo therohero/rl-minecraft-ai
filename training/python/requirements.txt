@@ -1,0 +1,31 @@
+# Core training + inference dependencies.
+#
+# `run.sh` / `run.ps1` do NOT `pip install -r` this file - they call
+# `ensure_deps.py`, which installs the same packages but picks the CPU-only
+# or the CUDA `torch` wheel to match the machine it's running on (an NVIDIA
+# GPU -> the CUDA build; otherwise the ~200 MB CPU build instead of the
+# ~3.5 GB default). Override with `RL_TORCH_BACKEND=cpu|cuda`. This file is
+# the manual fallback and the source of the version pins.
+
+torch>=2.1
+numpy>=1.24
+
+# Test runner (see python/tests/).
+pytest>=8.0
+
+# --- Manual install ---
+# CPU-only box:   pip install torch numpy pytest --index-url https://download.pytorch.org/whl/cpu
+#                 (numpy/pytest also resolve from that index; or install them separately from PyPI)
+# NVIDIA GPU:     pip install torch numpy pytest        (the default PyPI wheel bundles CUDA)
+#
+# --- Optional: non-NVIDIA GPU backends ---
+# The default `torch` wheel targets NVIDIA CUDA. For other accelerators,
+# install the matching build/package instead and run with `--device auto`
+# (or an explicit --device). See python/device.py.
+#
+#   AMD (Linux, ROCm):   pip install torch --index-url https://download.pytorch.org/whl/rocm6.1
+#                        (ROCm GPUs are reported through torch.cuda, so use --device cuda)
+#   Apple Silicon:       the default wheel already includes MPS -> --device mps
+#   Intel GPU (XPU):     pip install torch --index-url https://download.pytorch.org/whl/xpu
+#   DirectML (Win/WSL2,  pip install torch-directml    -> --device directml
+#   any D3D12 GPU):
