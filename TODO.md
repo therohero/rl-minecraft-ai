@@ -10,9 +10,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   the MLP a fixed short history; an LSTM head would carry unbounded memory
   for the POMDP. Needs sequence-based PPO (hidden state through the rollout
   buffer, reset on done, truncated BPTT). Keep the MLP the default.
-- [ ] **Automated flat→rough terrain curriculum.** `terrain_flat_only` exists
-  as a manual first-pass stage; wire it into a schedule that turns terrain
-  amplitude up over the first M updates.
 - [ ] **Separate-process rollout pipeline.** Perf note in the training-perf
   memory: after `--update-threads` / auto rollout threads, the next throughput
   lever is decoupling rollout collection from the update loop (or a GPU box).
