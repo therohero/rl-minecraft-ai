@@ -93,7 +93,7 @@ public final class ObservationBuilder {
         o.addProperty("self_hurt", clamp01(self.hurtTime / 10.0));
         o.addProperty("self_held", KitItem.of(self.getMainHandStack()).ordinal());
         o.addProperty("self_absorption", self.getAbsorptionAmount());
-        o.addProperty("self_eating", usingItem && held.isFood() ? 1.0 : 0.0);
+        o.addProperty("self_eating", usingItem && (held.isFood() || held.isSplashPotion()) ? 1.0 : 0.0);
         o.addProperty("self_bow_draw", clamp01(bowDraw));
         o.addProperty("self_burning", self.isOnFire() ? 1.0 : 0.0);
         o.addProperty("self_shield_disabled", clamp01(self.getItemCooldownManager().getCooldownProgress(SHIELD_PROBE, 0.0f)));

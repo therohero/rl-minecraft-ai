@@ -127,6 +127,8 @@
     "potion_harming_amplifier": 0,
     "instant_health_hp": 4.0,
     "instant_damage_hp": 6.0,
+    "potion_drink_seconds": 1.6,
+    "drink_duration_multiplier": 1.333,
     "fire_aspect_seconds_per_level": 4.0,
     "flame_seconds": 5.0,
     "punch_knockback_per_level": 0.3,

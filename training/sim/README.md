@@ -54,14 +54,18 @@ to train a policy against:
   diamond pickaxe** (mines placed blocks - see below), golden apples &
   heads, placeable planks/cobweb/water/lava, and (inherently) no natural
   regen. Weapons, enchants and armour come from `kit.rs`.
-- **splash potions** (`effects.rs`, `--config splash_potions`): thrown with
-  `use_item`, they arc under gravity and break on the first solid/entity
-  contact, applying a status effect in a `splash_radius` cloud with linear
-  distance falloff. Five types - Healing, Harming, Poison, Speed, Strength -
-  driving the vanilla effect table (Speed/Slowness move ±%, Strength/Weakness
-  flat melee ±, Regeneration/Poison HP-over-time, Instant Health/Damage,
-  Fire Resistance). **No kit carries potions by default** - a config's
-  `splash_potions: { poison: 2, ... }` hands them to both teams.
+- **splash potions** (`effects.rs`, `--config splash_potions`): a plain
+  `use_item` **throws** one - it arcs under gravity and breaks on the first
+  solid/entity contact, applying a status effect in a `splash_radius` cloud
+  with linear distance falloff. **Sneak + hold `use_item`** for
+  `potion_drink_seconds` (~1.6 s) instead **drinks** it (self-only, full
+  strength, `drink_duration_multiplier`x the splash duration; movement slows
+  and `self_eating` fills, like the golden apple). Five types - Healing,
+  Harming, Poison, Speed, Strength - driving the vanilla effect table
+  (Speed/Slowness move ±%, Strength/Weakness flat melee ±, Regeneration/Poison
+  HP-over-time, Instant Health/Damage, Fire Resistance). **No kit carries
+  potions by default** - a config's `splash_potions: { poison: 2, ... }`
+  hands them to both teams.
 - **a 9-slot physical hotbar** (`kit.rs::HOTBAR_SLOTS`): the held-item
   action (`HOTBAR_ACTION_DIM` = 9 + `ITEM_COUNT` classes) either selects a
   *slot* (key 1-9) or **hotkeys** an owned item into the selected slot (the
@@ -375,7 +379,8 @@ The `combat` block then holds the fine-grained numbers, grouped roughly as:
 - **consumables** - golden-apple / head absorption, regen and food.
 - **splash potions** - `splash_potion_speed` / `_gravity` / `_drag`,
   `splash_radius`, the per-effect `potion_*_seconds` / `potion_*_amplifier`,
-  and `instant_health_hp` / `instant_damage_hp`.
+  `instant_health_hp` / `instant_damage_hp`, and the drink knobs
+  `potion_drink_seconds` / `drink_duration_multiplier`.
 - **enchants** - `fire_aspect_seconds_per_level`, `flame_seconds`,
   `punch_knockback_per_level`, `knockback_enchant_per_level`.
 - **movement economy** - crouch (`sneak_*`), hunger (`*_exhaustion`,
@@ -409,10 +414,10 @@ A few things stay a conscious simplification or a training-only choice:
 - **A voxel world of full blocks only** - no slabs / stairs, so the 0.6
   step-up never fires on terrain (every 1-block step needs a jump), and the
   terrain observation fields are integer block tops.
-- **Splash potions and the Fire Aspect / Flame / Punch / Knockback /
-  Knockback Resistance enchants are modelled but *drink* potions and the
-  rest of the enchant table (Sharpness/Power/Piercing aside) are not** -
-  and no kit carries potions or these enchants unless a config opts in
-  (`splash_potions`, `enchants`).
+- **Splash potions (thrown *and* drunk) and the Fire Aspect / Flame /
+  Punch / Knockback / Knockback Resistance enchants are modelled; there's
+  no *separate* drink-potion item and no rest of the enchant table
+  (Sharpness/Power/Piercing aside)** - and no kit carries potions or these
+  enchants unless a config opts in (`splash_potions`, `enchants`).
 - **The golden head** is a UHC-server item, not vanilla; it lives only in
   the `uhc` kit.

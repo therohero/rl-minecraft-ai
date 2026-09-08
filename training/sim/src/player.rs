@@ -416,7 +416,51 @@ fn eat_seconds(item: Item) -> f32 {
     match item {
         Item::GoldenApple => cfg().combat.golden_apple_eat_seconds,
         Item::GoldenHead => cfg().combat.golden_head_eat_seconds,
+        // Splash potions can also be *drunk* (sneak + hold use_item): the
+        // same timed-consume machinery as eating, so `self_eating` in the
+        // observation covers it and movement slows while drinking.
+        _ if item.is_splash_potion() => cfg().combat.potion_drink_seconds,
         _ => f32::INFINITY,
+    }
+}
+
+/// A drunk splash potion finishes: apply its effect to the drinker at full
+/// strength (instant magnitude, or the splash duration scaled by
+/// `drink_duration_multiplier`), consume one, and fall back off the slot if
+/// that was the last.
+fn finish_drinking(p: &mut Player) {
+    let item = p.held;
+    let slot = item.index();
+    if p.counts[slot] == 0 {
+        p.eat_progress = 0.0;
+        return;
+    }
+    let Some((effect, amplifier)) = crate::effects::Effect::from_splash_item(item) else {
+        p.eat_progress = 0.0;
+        return;
+    };
+    p.counts[slot] -= 1;
+    if effect.is_instant() {
+        let mag = effect.instant_magnitude(amplifier);
+        match effect {
+            crate::effects::Effect::InstantHealth => {
+                p.hp = (p.hp + mag).min(combat::MAX_HP);
+            }
+            crate::effects::Effect::InstantDamage => {
+                p.take_damage(mag);
+            }
+            _ => {}
+        }
+    } else {
+        let secs = effect.splash_seconds() * cfg().combat.drink_duration_multiplier;
+        let ticks = (secs / DT) as u32;
+        p.effects.apply(effect, amplifier, ticks);
+    }
+    p.eat_progress = 0.0;
+    if p.counts[slot] == 0 {
+        p.slot = fallback_slot(p);
+        p.held = p.hotbar[p.slot];
+        p.prev_held = p.held;
     }
 }
 
@@ -594,9 +638,20 @@ pub(crate) fn apply_input(p: &mut Player, action: &Action) {
     } else if p.held.is_splash_potion() {
         p.bow_draw = 0.0;
         p.crossbow_load = 0.0;
-        p.eat_progress = 0.0;
-        if rising && p.counts[p.held.index()] > 0 {
-            p.pending_throw = Some(p.held);
+        let have = p.counts[p.held.index()] > 0;
+        if use_now && action.sneak && have {
+            // Sneak + hold `use_item` = drink the potion (self-only, timed
+            // like eating). Releasing either input cancels it.
+            p.eat_progress += DT;
+            if p.eat_progress >= eat_seconds(p.held) {
+                finish_drinking(p);
+            }
+        } else {
+            p.eat_progress = 0.0;
+            // Plain `use_item` (no sneak) throws it.
+            if rising && !action.sneak && have {
+                p.pending_throw = Some(p.held);
+            }
         }
     } else {
         // Melee weapon / empty hand -> use the off-hand shield if we have one.

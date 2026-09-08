@@ -82,6 +82,11 @@ public enum KitItem {
         return this == GOLDEN_APPLE || this == GOLDEN_HEAD;
     }
 
+    public boolean isSplashPotion() {
+        return this == SPLASH_HEALING || this == SPLASH_HARMING || this == SPLASH_POISON
+            || this == SPLASH_SPEED || this == SPLASH_STRENGTH;
+    }
+
     /** A held item whose right-click raises a guard (closest live proxy for a raised shield). */
     public boolean isShieldish() {
         return this == SWORD || this == AXE || this == EMPTY;
