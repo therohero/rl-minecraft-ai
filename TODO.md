@@ -58,8 +58,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Tooling / infra
 
-- [ ] **CI.** GitHub Actions running `cargo test` (sim + azalea_bot),
-  `pytest`, and `./gradlew build` on push / PR.
 - [ ] **`torch.export` migration.** `export_model.py` uses TorchScript because
   its on-disk format is stable across torch versions; revisit `.pt2` once it
   makes the same cross-version guarantee.

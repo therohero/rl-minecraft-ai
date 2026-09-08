@@ -1,5 +1,5 @@
 /training/sim/target/
-/training/checkpoints/*.pt
+/training/checkpoints/
 /azalea-bot/model/
 __pycache__/
 *.pyc

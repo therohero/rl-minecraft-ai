@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same branch cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test (sim + azalea_bot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            training/sim
+            azalea-bot/azalea_bot
+      - run: cargo test --manifest-path training/sim/Cargo.toml --locked
+      - run: cargo test --manifest-path azalea-bot/azalea_bot/Cargo.toml --locked
+
+  python:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: install deps (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r training/python/requirements.txt
+      - run: cd training/python && python -m pytest -q
+
+  smoke:
+    name: smoke_train.py (real sim + train.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: training/sim
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: install deps (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r training/python/requirements.txt
+      - run: cargo build --release --manifest-path training/sim/Cargo.toml --locked
+      - run: cd training/python && python smoke_train.py
+
+  mod:
+    name: gradlew build (Fabric mod)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: cd mod && ./gradlew build --no-daemon --stacktrace

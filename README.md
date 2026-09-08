@@ -270,6 +270,10 @@ cd mod && ./gradlew build       # Fabric client mod
 python training/python/smoke_train.py   # end-to-end: real sim + train.py, fresh + resume, <1 min
 ```
 
+**CI** (`.github/workflows/ci.yml`) runs all of the above on every push and
+pull request, in four parallel jobs: the two `cargo test` suites, `pytest`,
+`smoke_train.py` (real sim + `train.py`), and the mod's `./gradlew build`.
+
 `smoke_train.py` is the fast end-to-end check for a training-side change:
 it runs the actual Rust sim and `train.py` twice on a tiny config (few
 arenas, short rollouts, a handful of updates) against a throwaway
