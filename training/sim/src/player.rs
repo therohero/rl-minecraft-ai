@@ -85,6 +85,12 @@ pub struct Player {
     pub piercing: u32,
     /// Pickaxe Efficiency level (`uhc` = 3) - speeds up mining placed blocks.
     pub efficiency: u32,
+    /// Enchantment levels (0 unless a config's `enchants` grants them).
+    /// Fire Aspect / Knockback are sword traits; Flame / Punch are bow traits.
+    pub fire_aspect: u32,
+    pub knockback: u32,
+    pub flame: u32,
+    pub punch: u32,
     pub armor: Armor,
 
     // --- mining (uhc pickaxe) ---
@@ -173,7 +179,11 @@ impl Player {
             power: 0,
             piercing: 0,
             efficiency: 0,
-            armor: Armor { points: 20.0, toughness: 8.0, protection_epf: 14.0 },
+            fire_aspect: 0,
+            knockback: 0,
+            flame: 0,
+            punch: 0,
+            armor: Armor { points: 20.0, toughness: 8.0, protection_epf: 14.0, knockback_resistance: 0.0 },
             mining_cell: None,
             mining_progress: 0.0,
             time_since_last_attack: FULLY_CHARGED,
@@ -267,12 +277,17 @@ impl Player {
         self.power = l.power;
         self.piercing = l.piercing;
         self.efficiency = l.efficiency;
+        self.fire_aspect = l.fire_aspect;
+        self.knockback = l.knockback;
+        self.flame = l.flame;
+        self.punch = l.punch;
         self.mining_cell = None;
         self.mining_progress = 0.0;
         self.armor = Armor {
             points: l.armor_points,
             toughness: l.armor_toughness,
             protection_epf: l.protection_epf,
+            knockback_resistance: l.armor_knockback_resistance,
         };
     }
 
@@ -523,6 +538,8 @@ pub(crate) fn apply_input(p: &mut Player, action: &Action) {
                             base_damage: base,
                             piercing: 0,
                             crossbow: false,
+                            flame: p.flame > 0,
+                            punch: p.punch,
                         });
                     }
                     p.bow_draw = 0.0;
@@ -538,6 +555,8 @@ pub(crate) fn apply_input(p: &mut Player, action: &Action) {
                             base_damage: c.arrow_damage_per_speed,
                             piercing: (c.piercing_per_level * p.piercing) as i32,
                             crossbow: true,
+                            flame: false,
+                            punch: 0,
                         });
                         p.crossbow_load = 0.0;
                     }

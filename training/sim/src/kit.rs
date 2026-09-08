@@ -135,6 +135,14 @@ pub struct Loadout {
     pub armor_points: f32,
     pub armor_toughness: f32,
     pub protection_epf: f32,
+    /// Knockback Resistance attribute 0..1 (0 unless a config's `enchants`
+    /// sets it). See `combat::Armor`.
+    pub armor_knockback_resistance: f32,
+    /// Enchantment levels (0 unless a config's `enchants` grants them).
+    pub fire_aspect: u32,
+    pub flame: u32,
+    pub punch: u32,
+    pub knockback: u32,
 }
 
 impl Loadout {
@@ -156,6 +164,11 @@ impl Loadout {
             armor_toughness: 8.0,
             // 2x Protection IV + 2x Protection III.
             protection_epf: 2.0 * 4.0 + 2.0 * 3.0,
+            armor_knockback_resistance: 0.0,
+            fire_aspect: 0,
+            flame: 0,
+            punch: 0,
+            knockback: 0,
         }
     }
 }
@@ -248,6 +261,15 @@ pub fn loadout(kit: Kit) -> Loadout {
     l.counts[Item::SplashPoison.index()] = sp.poison;
     l.counts[Item::SplashSpeed.index()] = sp.speed;
     l.counts[Item::SplashStrength.index()] = sp.strength;
+
+    // Enchantments are opt-in per config too - no kit is enchanted with
+    // Fire Aspect / Flame / Punch / Knockback / Knockback Resistance.
+    let e = &cfg().enchants;
+    l.fire_aspect = e.fire_aspect;
+    l.flame = e.flame;
+    l.punch = e.punch;
+    l.knockback = e.knockback;
+    l.armor_knockback_resistance = e.knockback_resistance.clamp(0.0, 1.0);
 
     l.default_held = l.hotbar[l.default_slot];
     l

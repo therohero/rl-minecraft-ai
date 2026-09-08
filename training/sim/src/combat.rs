@@ -34,6 +34,9 @@ pub struct Armor {
     pub points: f32,
     pub toughness: f32,
     pub protection_epf: f32,
+    /// Knockback Resistance attribute, 0..1: fraction of an incoming
+    /// knockback impulse ignored (0 unless a config's `enchants` sets it).
+    pub knockback_resistance: f32,
 }
 
 /// The stats of the weapon a melee hit is resolved with. When attribute
@@ -355,6 +358,12 @@ pub(crate) fn resolve_melee(
         }
         ev[tj].damage_taken += applied;
         if !result.blocked {
+            // Fire Aspect (sword): a landed hit ignites the target.
+            let fa = players[i].fire_aspect;
+            if fa > 0 {
+                let secs = fa as f32 * combat_cfg.fire_aspect_seconds_per_level;
+                players[tj].burn_time_left = players[tj].burn_time_left.max(secs);
+            }
             let (attacker, victim) = pair_mut(players, i, tj);
             apply_knockback(attacker, victim, result.hit_type);
         }
@@ -406,17 +415,21 @@ fn apply_knockback(attacker: &mut Player, target: &mut Player, hit_type: HitType
     let kb = cfg().combat;
     let nx = dx / dist;
     let nz = dz / dist;
-    target.vel.x = target.vel.x / 2.0 - nx * kb.base_knockback;
-    target.vel.z = target.vel.z / 2.0 - nz * kb.base_knockback;
+    // Knockback enchant (sword): extra push along the same direction.
+    let horiz = kb.base_knockback + attacker.knockback as f32 * kb.knockback_enchant_per_level;
+    // Knockback Resistance (armour attribute): scales the whole impulse.
+    let resist = (1.0 - target.armor.knockback_resistance).clamp(0.0, 1.0);
+    target.vel.x = target.vel.x / 2.0 - nx * horiz * resist;
+    target.vel.z = target.vel.z / 2.0 - nz * horiz * resist;
     if target.on_ground {
-        target.vel.y = (target.vel.y / 2.0 + kb.base_knockback).min(kb.knockback_vertical_cap);
+        target.vel.y = (target.vel.y / 2.0 + kb.base_knockback * resist).min(kb.knockback_vertical_cap);
         target.on_ground = false;
     }
     if hit_type == HitType::SprintKnockback {
         let fwd = attacker.forward();
-        target.vel.x += fwd.x * kb.sprint_knockback_bonus;
-        target.vel.z += fwd.z * kb.sprint_knockback_bonus;
-        target.vel.y += kb.sprint_knockback_vertical_bonus;
+        target.vel.x += fwd.x * kb.sprint_knockback_bonus * resist;
+        target.vel.z += fwd.z * kb.sprint_knockback_bonus * resist;
+        target.vel.y += kb.sprint_knockback_vertical_bonus * resist;
         target.on_ground = false;
         attacker.vel.x *= 0.6;
         attacker.vel.z *= 0.6;
@@ -431,7 +444,8 @@ fn apply_sweep_knockback(attacker: &mut Player, target: &mut Player) {
     if dist < 1e-4 {
         return;
     }
-    let s = cfg().combat.sweep_knockback;
+    let resist = (1.0 - target.armor.knockback_resistance).clamp(0.0, 1.0);
+    let s = cfg().combat.sweep_knockback * resist;
     let nx = dx / dist;
     let nz = dz / dist;
     target.vel.x = target.vel.x / 2.0 + nx * s;
@@ -447,7 +461,7 @@ mod tests {
     use super::*;
 
     fn diamond() -> Armor {
-        Armor { points: 20.0, toughness: 8.0, protection_epf: 0.0 }
+        Armor { points: 20.0, toughness: 8.0, protection_epf: 0.0, knockback_resistance: 0.0 }
     }
 
     fn atk() -> AttackerState {
@@ -515,5 +529,60 @@ mod tests {
         assert!(resolve_attack(&atk(), &sword, &tgt()).triggers_sweep);
         assert!(!resolve_attack(&atk(), &axe, &tgt()).triggers_sweep);
         assert!(!resolve_attack(&atk(), &fist, &tgt()).triggers_sweep);
+    }
+
+    fn knockback_pair(atk_knockback: u32, target_resist: f32) -> (Player, Player) {
+        let mut a = Player::new(0);
+        a.pos = Vec3::new(0.0, 0.0, 0.0);
+        a.knockback = atk_knockback;
+        let mut t = Player::new(1);
+        t.pos = Vec3::new(0.0, 0.0, 2.0); // 2 blocks in +z from the attacker
+        t.vel = Vec3::ZERO;
+        t.on_ground = false; // isolate the horizontal push
+        t.armor.knockback_resistance = target_resist;
+        (a, t)
+    }
+
+    #[test]
+    fn knockback_enchant_adds_push_and_resistance_removes_it() {
+        let plain = {
+            let (mut a, mut t) = knockback_pair(0, 0.0);
+            apply_knockback(&mut a, &mut t, HitType::Sweep);
+            t.vel.z.abs()
+        };
+        let enchanted = {
+            let (mut a, mut t) = knockback_pair(2, 0.0);
+            apply_knockback(&mut a, &mut t, HitType::Sweep);
+            t.vel.z.abs()
+        };
+        let resisted = {
+            let (mut a, mut t) = knockback_pair(2, 1.0); // full resistance
+            apply_knockback(&mut a, &mut t, HitType::Sweep);
+            t.vel.z.abs()
+        };
+        assert!(enchanted > plain, "Knockback II pushes harder: {enchanted} vs {plain}");
+        assert!(resisted < 1e-6, "full Knockback Resistance cancels the push: {resisted}");
+    }
+
+    #[test]
+    fn fire_aspect_ignites_a_melee_target() {
+        // Drive a real swing: attacker with Fire Aspect 1, target in reach.
+        let mut players = [Player::new(0), Player::new(1)];
+        players[0].pos = Vec3::new(0.0, 0.0, 0.0);
+        players[0].held = Item::Sword;
+        players[0].fire_aspect = 1;
+        players[0].time_since_last_attack = crate::player::FULLY_CHARGED;
+        players[1].pos = Vec3::new(0.0, 0.0, 2.0);
+        players[1].armor = diamond();
+        let world = BlockWorld::default();
+        let terrain = Terrain::flat();
+        let mut ev = [StepEvents::default(); 2];
+        resolve_melee(0, &mut players, &world, &terrain, &mut ev);
+        assert!(ev[0].damage_dealt > 0.0, "the hit landed");
+        assert!(
+            players[1].burn_time_left >= cfg().combat.fire_aspect_seconds_per_level - 1e-3,
+            "target is on fire for a Fire Aspect duration: {}",
+            players[1].burn_time_left
+        );
     }
 }

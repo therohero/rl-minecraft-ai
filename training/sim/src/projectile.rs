@@ -39,6 +39,10 @@ pub struct PendingShot {
     pub base_damage: f32,
     pub piercing: i32,
     pub crossbow: bool,
+    /// Flame (bow): the arrow ignites the player it hits.
+    pub flame: bool,
+    /// Punch (bow): extra knockback levels on hit.
+    pub punch: u32,
 }
 
 #[derive(Clone)]
@@ -52,6 +56,10 @@ pub struct Projectile {
     /// so a drag-slowed long shot lands softer (vanilla behaviour).
     pub base_damage: f32,
     pub piercing_left: i32,
+    /// Flame (bow): the arrow ignites the player it hits.
+    pub flame: bool,
+    /// Punch (bow): extra knockback levels applied on hit.
+    pub punch: u32,
     pub hit: Vec<usize>,
     pub life_ticks: u32,
     /// Last `MAX_DELAY_TICKS + 1` (pos, vel) snapshots so a laggy observer
@@ -124,6 +132,8 @@ pub(crate) fn spawn(
         owner_team: shooter.team,
         base_damage: shot.base_damage,
         piercing_left: shot.piercing,
+        flame: shot.flame,
+        punch: shot.punch,
         hit: Vec::new(),
         life_ticks: 0,
         history: VecDeque::new(),
@@ -166,6 +176,8 @@ pub(crate) fn spawn_splash(
         owner_team: thrower.team,
         base_damage: 0.0,
         piercing_left: 0,
+        flame: false,
+        punch: 0,
         hit: Vec::new(),
         life_ticks: 0,
         history: VecDeque::new(),
@@ -347,13 +359,22 @@ pub(crate) fn step_all(
                             ev[owner].damage_dealt += applied;
                         }
                         ev[j].damage_taken += applied;
+                        // Flame (bow): the arrow ignites the target.
+                        if projectiles[idx].flame {
+                            players[j].burn_time_left = players[j].burn_time_left.max(c.flame_seconds);
+                        }
                         if !blocked {
+                            // Base arrow knockback + Punch, scaled by the
+                            // target's Knockback Resistance.
+                            let punch = projectiles[idx].punch as f32 * c.punch_knockback_per_level;
+                            let horiz = c.base_knockback + punch;
+                            let resist = (1.0 - players[j].armor.knockback_resistance).clamp(0.0, 1.0);
                             let sp = (v.x * v.x + v.z * v.z).sqrt().max(1e-4);
                             let p = &mut players[j];
-                            p.vel.x += v.x / sp * c.base_knockback;
-                            p.vel.z += v.z / sp * c.base_knockback;
+                            p.vel.x += v.x / sp * horiz * resist;
+                            p.vel.z += v.z / sp * horiz * resist;
                             if p.on_ground {
-                                p.vel.y = (p.vel.y + c.base_knockback * 0.6).min(c.knockback_vertical_cap);
+                                p.vel.y = (p.vel.y + c.base_knockback * 0.6 * resist).min(c.knockback_vertical_cap);
                                 p.on_ground = false;
                             }
                         }
@@ -397,6 +418,8 @@ mod tests {
             base_damage: cfg().combat.arrow_damage_per_speed,
             piercing: 0,
             crossbow: false,
+            flame: false,
+            punch: 0,
         }
     }
 
@@ -490,6 +513,35 @@ mod tests {
         }
         assert!(players[0].effects.has(Effect::Speed));
         assert!(players[0].effects.move_multiplier() > 1.0);
+    }
+
+    #[test]
+    fn a_flame_arrow_ignites_and_punch_adds_knockback() {
+        let fire_arrow = |flame: bool, punch: u32| -> (f32, f32) {
+            let mut rng = StdRng::seed_from_u64(4);
+            let mut atk = shooter();
+            let mut tgt = Player::new(1);
+            tgt.pos = Vec3::new(0.0, 0.0, 4.0);
+            tgt.armor.points = 0.0;
+            tgt.armor.protection_epf = 0.0;
+            let mut players = [atk.clone(), tgt];
+            let mut ps = Vec::new();
+            let shot = PendingShot { flame, punch, ..full_bow_shot() };
+            spawn(&mut ps, &mut atk, 0, shot, &mut rng);
+            let terrain = Terrain::flat();
+            let world = BlockWorld::default();
+            let mut ev = [StepEvents::default(); 2];
+            for _ in 0..40 {
+                step_all(&mut ps, &mut players, &world, &terrain, &mut ev);
+            }
+            (players[1].burn_time_left, players[1].vel.z.abs())
+        };
+        let (burn_plain, kb_plain) = fire_arrow(false, 0);
+        let (burn_flame, _) = fire_arrow(true, 0);
+        let (_, kb_punch) = fire_arrow(false, 2);
+        assert_eq!(burn_plain, 0.0);
+        assert!(burn_flame > 0.0, "flame arrow sets the target on fire");
+        assert!(kb_punch > kb_plain, "Punch II hits harder: {kb_punch} vs {kb_plain}");
     }
 
     #[test]

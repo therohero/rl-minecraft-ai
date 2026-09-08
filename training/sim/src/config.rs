@@ -341,6 +341,18 @@ pub struct CombatConfig {
     /// Instant Health / Damage HP at amplifier 0 (doubled per level).
     pub instant_health_hp: f32,
     pub instant_damage_hp: f32,
+
+    // --- enchantments (opt-in per config via `SimConfig::enchants`) ---
+    /// Seconds of fire a Fire Aspect *level* sets on a melee-hit target
+    /// (vanilla FA I = 4 s).
+    pub fire_aspect_seconds_per_level: f32,
+    /// Seconds of fire a Flame arrow sets (level 1 only in vanilla).
+    pub flame_seconds: f32,
+    /// Extra arrow knockback impulse per Punch level.
+    pub punch_knockback_per_level: f32,
+    /// Extra melee knockback impulse per Knockback level (added along the
+    /// same push direction as the base hit).
+    pub knockback_enchant_per_level: f32,
 }
 
 impl Default for CombatConfig {
@@ -458,8 +470,28 @@ impl Default for CombatConfig {
             potion_harming_amplifier: 0,   // Harming I
             instant_health_hp: 4.0,        // Healing I = 4, II = 8
             instant_damage_hp: 6.0,        // Harming I = 6, II = 12
+
+            fire_aspect_seconds_per_level: 4.0,
+            flame_seconds: 5.0,
+            punch_knockback_per_level: 0.3,
+            knockback_enchant_per_level: 0.5,
         }
     }
+}
+
+/// Enchantment levels a player spawns with. All 0 by default (no kit is
+/// enchanted with these) - a config opts in, so existing runs and
+/// checkpoints are unaffected. Fire Aspect / Knockback are sword traits,
+/// Flame / Punch are bow traits, Knockback Resistance is an armour
+/// attribute (0..1, fraction of knockback ignored).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EnchantLoadout {
+    pub fire_aspect: u32,
+    pub flame: u32,
+    pub punch: u32,
+    pub knockback: u32,
+    pub knockback_resistance: f32,
 }
 
 /// Splash-potion counts a player spawns with. Every field defaults to 0 -
@@ -652,6 +684,9 @@ pub struct SimConfig {
     /// (no kit carries potions); set any field to hand that potion to both
     /// teams. See `SplashPotionLoadout` and `effects.rs`.
     pub splash_potions: SplashPotionLoadout,
+    /// Enchantment levels every player spawns with (Fire Aspect, Flame,
+    /// Punch, Knockback, Knockback Resistance). All 0 by default.
+    pub enchants: EnchantLoadout,
     pub combat: CombatConfig,
     pub reward: RewardConfig,
 }
@@ -686,6 +721,7 @@ impl Default for SimConfig {
             max_ping_ms: 100.0,
             ping_jitter_ms: 15.0,
             splash_potions: SplashPotionLoadout::default(),
+            enchants: EnchantLoadout::default(),
             combat: CombatConfig::default(),
             reward: RewardConfig::default(),
         }
@@ -815,6 +851,25 @@ mod tests {
         assert_eq!(cfg.splash_potions.poison, 3);
         assert_eq!(cfg.splash_potions.speed, 1);
         assert_eq!(cfg.splash_potions.healing, 0);
+    }
+
+    #[test]
+    fn enchants_default_to_zero_and_are_config_opt_in() {
+        let d = SimConfig::default().enchants;
+        assert_eq!((d.fire_aspect, d.flame, d.punch, d.knockback), (0, 0, 0, 0));
+        assert_eq!(d.knockback_resistance, 0.0);
+        for kit in [Kit::Sword, Kit::Axe, Kit::Uhc] {
+            let l = crate::kit::loadout(kit);
+            assert_eq!((l.fire_aspect, l.flame, l.punch, l.knockback), (0, 0, 0, 0));
+            assert_eq!(l.armor_knockback_resistance, 0.0);
+        }
+        let cfg: SimConfig = serde_json::from_str(
+            r#"{ "enchants": { "fire_aspect": 2, "knockback_resistance": 0.4 } }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.enchants.fire_aspect, 2);
+        assert_eq!(cfg.enchants.knockback_resistance, 0.4);
+        assert_eq!(cfg.enchants.flame, 0);
     }
 
     #[test]
