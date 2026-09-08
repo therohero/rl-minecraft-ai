@@ -126,7 +126,11 @@
     "potion_healing_amplifier": 1,
     "potion_harming_amplifier": 0,
     "instant_health_hp": 4.0,
-    "instant_damage_hp": 6.0
+    "instant_damage_hp": 6.0,
+    "fire_aspect_seconds_per_level": 4.0,
+    "flame_seconds": 5.0,
+    "punch_knockback_per_level": 0.3,
+    "knockback_enchant_per_level": 0.5
   },
   "splash_potions": {
     "healing": 0,
@@ -134,6 +138,13 @@
     "poison": 0,
     "speed": 0,
     "strength": 0
+  },
+  "enchants": {
+    "fire_aspect": 0,
+    "flame": 0,
+    "punch": 0,
+    "knockback": 0,
+    "knockback_resistance": 0.0
   },
   "reward": {
     "per_hp_dealt": 1.0,

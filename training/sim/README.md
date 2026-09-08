@@ -140,6 +140,11 @@ to train a policy against:
   immediately and the HP comes back over time via Regeneration (the golden
   head heals at twice the apple's rate).
 - fall damage - a **cobweb** arrests the fall and negates it.
+- **enchants** (`--config enchants`, all off by default): **Fire Aspect**
+  ignites a melee target, **Flame** ignites an arrow target, **Punch** adds
+  arrow knockback, **Knockback** adds melee knockback, and **Knockback
+  Resistance** (an armour attribute, 0..1) scales *all* incoming knockback
+  down. Sharpness / Power / Piercing are on the `uhc` kit already.
 - a **circular arena** with optional rolling terrain and a velocity-killing
   rim (no edge to fall off).
 - **UHC perimeter wall** - the `uhc` kit rings the arena rim with a solid
@@ -354,6 +359,7 @@ the full list. Top-level fields, by area:
 | **arena** | `arena_radius`, `terrain_max_amplitude`, `terrain_flat_only`, and the rim wall `arena_walls` / `arena_wall_height` (forced on for the `uhc` kit) |
 | **observation** | `max_observed_enemies` / `_teammates` / `_projectiles`, `block_view_size` |
 | **splash potions** | `splash_potions: { healing, harming, poison, speed, strength }` - per-player starting counts, all 0 by default (no kit carries potions) |
+| **enchants** | `enchants: { fire_aspect, flame, punch, knockback, knockback_resistance }` - per-player levels (0..1 for resistance), all 0 by default |
 | **latency (domain randomization)** | `min_ping_ms` / `max_ping_ms`, `ping_jitter_ms` |
 | **regularizer** | `max_look_delta` (the per-tick crosshair clamp) |
 | **reward weights** | the `reward` block |
@@ -370,6 +376,8 @@ The `combat` block then holds the fine-grained numbers, grouped roughly as:
 - **splash potions** - `splash_potion_speed` / `_gravity` / `_drag`,
   `splash_radius`, the per-effect `potion_*_seconds` / `potion_*_amplifier`,
   and `instant_health_hp` / `instant_damage_hp`.
+- **enchants** - `fire_aspect_seconds_per_level`, `flame_seconds`,
+  `punch_knockback_per_level`, `knockback_enchant_per_level`.
 - **movement economy** - crouch (`sneak_*`), hunger (`*_exhaustion`,
   `min_food_to_sprint`, `*_regen_seconds`), swimming (`swim_*`).
 - **block grid** - `place_reach`, `water_tick_ticks` / `lava_tick_ticks`,
@@ -401,8 +409,10 @@ A few things stay a conscious simplification or a training-only choice:
 - **A voxel world of full blocks only** - no slabs / stairs, so the 0.6
   step-up never fires on terrain (every 1-block step needs a jump), and the
   terrain observation fields are integer block tops.
-- **Splash potions are modelled but drink potions, Fire Aspect, Flame,
-  Punch and knockback resistance are not** - and no kit carries potions
-  unless a config opts in (`splash_potions`).
+- **Splash potions and the Fire Aspect / Flame / Punch / Knockback /
+  Knockback Resistance enchants are modelled but *drink* potions and the
+  rest of the enchant table (Sharpness/Power/Piercing aside) are not** -
+  and no kit carries potions or these enchants unless a config opts in
+  (`splash_potions`, `enchants`).
 - **The golden head** is a UHC-server item, not vanilla; it lives only in
   the `uhc` kit.

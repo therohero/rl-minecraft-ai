@@ -53,9 +53,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 - [ ] **Drink potions.** Splash potions are modelled (`effects.rs`,
   `--config splash_potions`); add the drinkable form (hold `use_item` ~1.6 s,
   self-only) reusing the same effect table. Still opt-in via config.
-- [ ] **Enchantment gaps.** Fire Aspect, Flame, Punch, knockback resistance —
-  none modelled. Model them, but no kit gets them by default (opt-in via
-  sim config).
 - [ ] **Non-full blocks.** No slabs/stairs, so the 0.6 step-up never fires on
   terrain. Low priority. Add them, but no kit places/carries them by default.
 
