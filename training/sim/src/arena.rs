@@ -765,6 +765,41 @@ mod tests {
     }
 
     #[test]
+    fn sneak_and_hold_use_drinks_a_splash_potion_without_throwing_it() {
+        let mut arena = duel(combat::MAX_HP, combat::MAX_HP);
+        arena.players[0].counts[Item::SplashSpeed.index()] = 2;
+        arena.players[0].slot = 0;
+        arena.players[0].hotbar[0] = Item::SplashSpeed;
+        arena.players[0].held = Item::SplashSpeed;
+        let drink = Action { use_item: true, sneak: true, ..Action::NOOP };
+        // Enough ticks to finish the ~1.6 s drink.
+        let ticks = (cfg().combat.potion_drink_seconds / crate::physics::DT) as usize + 2;
+        for _ in 0..ticks {
+            arena.step(&[drink, noop()]);
+        }
+        assert!(arena.projectiles.is_empty(), "drinking never throws a potion");
+        assert_eq!(arena.players[0].counts[Item::SplashSpeed.index()], 1, "one potion consumed");
+        assert!(arena.players[0].effects.has(crate::effects::Effect::Speed), "the drinker got Speed");
+    }
+
+    #[test]
+    fn plain_use_on_a_splash_potion_still_throws_it() {
+        let mut arena = duel(combat::MAX_HP, combat::MAX_HP);
+        arena.players[0].counts[Item::SplashPoison.index()] = 1;
+        arena.players[0].slot = 0;
+        arena.players[0].hotbar[0] = Item::SplashPoison;
+        arena.players[0].held = Item::SplashPoison;
+        // The opponent is 1 block away, so the thrown potion breaks on impact
+        // the same tick - check the effect landed rather than a live projectile.
+        arena.step(&[Action { use_item: true, ..Action::NOOP }, noop()]);
+        assert_eq!(arena.players[0].counts[Item::SplashPoison.index()], 0, "the potion was thrown");
+        assert!(
+            arena.players[1].effects.has(crate::effects::Effect::Poison),
+            "the splashed opponent is poisoned"
+        );
+    }
+
+    #[test]
     fn a_hotkey_for_an_unowned_item_is_a_noop() {
         let mut arena = duel(combat::MAX_HP, combat::MAX_HP);
         arena.players[0].counts[Item::GoldenHead.index()] = 0;

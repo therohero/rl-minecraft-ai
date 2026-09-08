@@ -341,6 +341,12 @@ pub struct CombatConfig {
     /// Instant Health / Damage HP at amplifier 0 (doubled per level).
     pub instant_health_hp: f32,
     pub instant_damage_hp: f32,
+    /// Seconds of `sneak + use_item` to finish *drinking* a splash potion
+    /// (self-only; vanilla potion use time ~1.6 s).
+    pub potion_drink_seconds: f32,
+    /// A drunk timed potion lasts this multiple of the splash duration
+    /// (vanilla splash = 3/4 of the drink, so 4/3 here).
+    pub drink_duration_multiplier: f32,
 
     // --- enchantments (opt-in per config via `SimConfig::enchants`) ---
     /// Seconds of fire a Fire Aspect *level* sets on a melee-hit target
@@ -470,6 +476,8 @@ impl Default for CombatConfig {
             potion_harming_amplifier: 0,   // Harming I
             instant_health_hp: 4.0,        // Healing I = 4, II = 8
             instant_damage_hp: 6.0,        // Harming I = 6, II = 12
+            potion_drink_seconds: 1.6,
+            drink_duration_multiplier: 1.333,
 
             fire_aspect_seconds_per_level: 4.0,
             flame_seconds: 5.0,
