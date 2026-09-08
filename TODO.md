@@ -46,11 +46,13 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 ## Sim fidelity (`training/sim/`)
 
 - [ ] **Potions / splash potions.** Biggest missing real-PvP mechanic
-  (speed, strength, healing, poison, harming). Currently out of scope.
+  (speed, strength, healing, poison, harming). Model them, but no kit gets
+  them by default — they stay opt-in via sim config.
 - [ ] **Enchantment gaps.** Fire Aspect, Flame, Punch, knockback resistance —
-  none modelled.
+  none modelled. Model them, but no kit gets them by default (opt-in via
+  sim config).
 - [ ] **Non-full blocks.** No slabs/stairs, so the 0.6 step-up never fires on
-  terrain. Low priority.
+  terrain. Low priority. Add them, but no kit places/carries them by default.
 
 ## Tooling / infra
 
