@@ -39,6 +39,7 @@ import torch
 import features
 from device import resolve_device
 from env import DEFAULT_SIM_BINARY, SelfPlayArenaEnv
+from frame_stack import FrameStacker
 from logging_setup import get_logger
 from metrics import MetricsWriter
 from opponents import OpponentPool, benchmark_slot_mask, opponent_slot_mask
@@ -346,6 +347,16 @@ def main():
         default=2,
         help="trunk depth in Linear+Tanh blocks (default 2) - the standard actor-critic depth; deeper "
         "rarely helps a low-dim control task and slows every rollout step.",
+    )
+    net.add_argument(
+        "--frame-stack",
+        type=int,
+        default=1,
+        help="observations fed to the policy = the last N frames concatenated (default 1 = the "
+        "memoryless MLP). N>1 gives the same trunk a short history for the latency-delayed, "
+        "occlusion-limited view of other players, at N x the input width. Changing it makes existing "
+        "checkpoints unresumable (pass --fresh). NOTE: the live inference bridges (azalea-bot, mod) "
+        "don't stack frames yet, so an N>1 checkpoint can't be exported for live play.",
     )
 
     sim = parser.add_argument_group(
@@ -673,12 +684,16 @@ def main():
         # features.OBS_DIM is only final after env's handshake calls
         # features.configure() (it depends on the sim's team-observation
         # config), so read it here rather than importing it at module load.
-        obs_dim = features.OBS_DIM
+        base_obs_dim = features.OBS_DIM
+        frame_stack = max(1, args.frame_stack)
+        # The width the policy actually sees: `--frame-stack` frames concatenated.
+        obs_dim = base_obs_dim * frame_stack
         slot_dim = features.HOTBAR_ACTION_DIM
         log.info(
-            "kit=%s, %dv%d, %d policy slots, obs_dim=%d, held-slot classes=%d (%d select + %d hotkey)",
-            env.kit, env.team_size, env.team_size, num_slots, obs_dim, slot_dim,
-            features.HOTBAR_SLOTS, features.ITEM_COUNT,
+            "kit=%s, %dv%d, %d policy slots, obs_dim=%d (base %d x frame_stack %d), "
+            "held-slot classes=%d (%d select + %d hotkey)",
+            env.kit, env.team_size, env.team_size, num_slots, obs_dim, base_obs_dim, frame_stack,
+            slot_dim, features.HOTBAR_SLOTS, features.ITEM_COUNT,
         )
 
         model = ActorCritic(
@@ -702,6 +717,13 @@ def main():
                     f"checkpoint architecture {ckpt_arch} != requested "
                     f"hidden_size={args.hidden_size} num_layers={args.num_layers} slot_dim={slot_dim}; "
                     "pass matching --hidden-size/--num-layers (and kit) to resume, or --fresh to start over"
+                )
+            ckpt_frame_stack = ckpt.get("frame_stack", 1)
+            if ckpt_frame_stack != frame_stack:
+                raise SystemExit(
+                    f"checkpoint was trained with --frame-stack {ckpt_frame_stack}, but this run asked "
+                    f"for {frame_stack}; pass --frame-stack {ckpt_frame_stack} to resume, or --fresh to "
+                    "start over"
                 )
             ckpt_obs_dim = ckpt.get("obs_dim")
             if ckpt_obs_dim is not None and ckpt_obs_dim != obs_dim:
@@ -782,10 +804,14 @@ def main():
         scripted_wins = 0
         scripted_matches = 0
 
-        obs_np = env.reset()
+        # `cur_obs_np` is always the latest single frame (the scripted
+        # opponent reads fixed indices out of it); `obs` is what the policy
+        # sees - identical to `cur_obs_np` unless --frame-stack > 1.
+        stacker = FrameStacker(num_slots, base_obs_dim, frame_stack) if frame_stack > 1 else None
+        cur_obs_np = env.reset()
         if args.obs_noise > 0.0:
-            obs_np = obs_np + opp_rng.normal(0.0, args.obs_noise, obs_np.shape).astype(np.float32)
-        obs = torch.as_tensor(obs_np)
+            cur_obs_np = cur_obs_np + opp_rng.normal(0.0, args.obs_noise, cur_obs_np.shape).astype(np.float32)
+        obs = torch.as_tensor(stacker.reset(cur_obs_np) if stacker else cur_obs_np)
 
         # Rolling win-rate / episode-return trackers purely for console logging.
         episode_return = np.zeros(num_slots, dtype=np.float32)
@@ -812,7 +838,7 @@ def main():
                 actions = build_actions(act_out, num_slots)
 
                 if opp_kind == "scripted":
-                    actions[opp_idx] = pool.scripted.actions(obs.numpy()[opp_idx])
+                    actions[opp_idx] = pool.scripted.actions(cur_obs_np[opp_idx])
                 elif opp_kind == "net":
                     with torch.no_grad():
                         opp_out = opp_net.act(obs[opp_idx])
@@ -849,7 +875,8 @@ def main():
                     next_obs_np = next_obs_np + opp_rng.normal(
                         0.0, args.obs_noise, next_obs_np.shape
                     ).astype(np.float32)
-                obs = torch.as_tensor(next_obs_np)
+                cur_obs_np = next_obs_np
+                obs = torch.as_tensor(stacker.push(next_obs_np, dones) if stacker else next_obs_np)
 
             with torch.no_grad():
                 *_, last_value = collect_model.forward(obs)
@@ -1058,11 +1085,15 @@ def _save_checkpoint(
     """Writes `latest.pt` (the auto-resume point) and the numbered
     `policy_update_<update>.pt` history file, then prunes old snapshots.
     Called every `--checkpoint-every` updates and once more on any exit."""
+    # The policy's real input width (== base feature width x --frame-stack).
+    policy_obs_dim = model.trunk[0].in_features
+    frame_stack = max(1, round(policy_obs_dim / features.OBS_DIM))
     payload = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "update": update,
-        "obs_dim": features.OBS_DIM,
+        "obs_dim": policy_obs_dim,
+        "frame_stack": frame_stack,
         # Enough to rebuild the exact policy for export/inference without
         # re-deriving anything: trunk shape, and the sim-side normalization
         # constants this run trained against.

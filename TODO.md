@@ -6,9 +6,10 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Training
 
-- [ ] **Recurrent or frame-stacked policy.** The trunk is a memoryless MLP,
-  but the task is a POMDP (latency-delayed view of others, occlusion). Try an
-  LSTM head or an N-frame observation stack; keep the MLP as the default.
+- [ ] **LSTM policy head.** Frame stacking (`--frame-stack N`, done) gives
+  the MLP a fixed short history; an LSTM head would carry unbounded memory
+  for the POMDP. Needs sequence-based PPO (hidden state through the rollout
+  buffer, reset on done, truncated BPTT). Keep the MLP the default.
 - [ ] **Automated flat→rough terrain curriculum.** `terrain_flat_only` exists
   as a manual first-pass stage; wire it into a schedule that turns terrain
   amplitude up over the first M updates.
@@ -21,6 +22,11 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 - [ ] **Inference server hot-reload.** `inference_server.py` only picks up new
   weights on restart. Watch `model/` (or a `SIGHUP`) and reload `policy.pt` +
   `spec.json` in place.
+- [ ] **Live frame stacking.** Training supports `--frame-stack N` but the
+  bridges build one frame, so `export_model.py` refuses `N>1` checkpoints.
+  Keep the last `N` observations per bot in `azalea_bot` + the mod (clearing
+  on match start) and feed the concatenation; read `frame_stack` from
+  `spec.json`.
 - [ ] **Optional binary `/act` body.** Keep HTTP+JSON as the default, but
   accept a flat-`f32` observation body (and return a flat action) on the same
   endpoint for the case where JSON encode/decode ever shows up in the
