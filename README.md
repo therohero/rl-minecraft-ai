@@ -226,7 +226,17 @@ pytest                          # Python trainer / feature tests
 cd training/sim && cargo test   # Rust sim tests
 cd azalea-bot/azalea_bot && cargo test   # live bridge: guard geometry, config
 cd mod && ./gradlew build       # Fabric client mod
+
+python training/python/smoke_train.py   # end-to-end: real sim + train.py, fresh + resume, <1 min
 ```
+
+`smoke_train.py` is the fast end-to-end check for a training-side change:
+it runs the actual Rust sim and `train.py` twice on a tiny config (few
+arenas, short rollouts, a handful of updates) against a throwaway
+checkpoint dir, then asserts on the run's logs and the checkpoint/league
+files it leaves behind — a fresh run trains and checkpoints, a second run
+resumes from `latest.pt` at the right update. Needs the sim built once
+(`cd training/sim && cargo build --release`).
 
 The `pytest` suite cross-checks the inference bridge's per-observation
 decode (`features.observation_to_row`) against training's vectorized one
