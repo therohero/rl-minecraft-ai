@@ -40,6 +40,7 @@ import features
 from device import resolve_device
 from env import DEFAULT_SIM_BINARY, SelfPlayArenaEnv
 from logging_setup import get_logger
+from metrics import MetricsWriter
 from opponents import OpponentPool, benchmark_slot_mask, opponent_slot_mask
 from ppo_agent import ActorCritic, RolloutBuffer, ppo_update
 
@@ -516,6 +517,34 @@ def main():
     )
     parser.add_argument("--checkpoint-dir", type=str, default="../checkpoints")
     parser.add_argument(
+        "--log-every",
+        type=int,
+        default=10,
+        help="PPO updates between progress lines (and metrics rows). The rolling return / win-rate "
+        "averages cover this window.",
+    )
+    parser.add_argument(
+        "--metrics-csv",
+        type=str,
+        nargs="?",
+        const="AUTO",
+        default=None,
+        help="also write the progress metrics (returns, win rates, losses, entropy, KL, clip "
+        "fraction, steps/sec) as CSV - one row per logged update, at the same cadence as the "
+        "console line. Bare --metrics-csv writes <checkpoint-dir>/metrics.csv; pass a path to "
+        "choose the file. Appended to (under the existing header) on resume.",
+    )
+    parser.add_argument(
+        "--tensorboard",
+        type=str,
+        nargs="?",
+        const="AUTO",
+        default=None,
+        help="also log the same metrics to a TensorBoard event dir (needs `pip install "
+        "tensorboard`; a missing package is warned about, not fatal). Bare --tensorboard uses "
+        "<checkpoint-dir>/tb; pass a path to choose the dir.",
+    )
+    parser.add_argument(
         "--checkpoint-every",
         type=int,
         default=200,
@@ -617,6 +646,14 @@ def main():
     )
 
     sim_config_path = resolve_sim_config(args)
+
+    csv_path = (
+        os.path.join(args.checkpoint_dir, "metrics.csv") if args.metrics_csv == "AUTO" else args.metrics_csv
+    )
+    tb_dir = (
+        os.path.join(args.checkpoint_dir, "tb") if args.tensorboard == "AUTO" else args.tensorboard
+    )
+    metrics = MetricsWriter(csv_path=csv_path, tensorboard_dir=tb_dir)
 
     env = None
     model = None
@@ -881,7 +918,7 @@ def main():
 
             last_update_completed = update
 
-            if update % 10 == 0:
+            if update % args.log_every == 0:
                 elapsed = time.time() - start_time
                 sps = total_env_steps / elapsed
                 avg_return = np.mean(recent_returns) if recent_returns else float("nan")
@@ -890,7 +927,8 @@ def main():
                 log.info(
                     "update=%d env_steps=%d steps/sec=%.0f avg_return=%.2f "
                     "win_rate=%.2f win_vs_scripted=%.2f (n=%d) "
-                    "policy_loss=%.4f value_loss=%.4f entropy=%.4f entropy_coef=%.5f lr=%.2e",
+                    "policy_loss=%.4f value_loss=%.4f entropy=%.4f approx_kl=%.4f clip_frac=%.2f "
+                    "entropy_coef=%.5f lr=%.2e",
                     update,
                     total_env_steps,
                     sps,
@@ -901,9 +939,28 @@ def main():
                     stats["policy_loss"],
                     stats["value_loss"],
                     stats["entropy"],
+                    stats["approx_kl"],
+                    stats["clip_frac"],
                     entropy_coef,
                     lr_now,
                 )
+                if metrics.active:
+                    metrics.log(update, {
+                        "env_steps": total_env_steps,
+                        "steps_per_sec": sps,
+                        "avg_return": avg_return,
+                        "win_rate": win_rate,
+                        "win_vs_scripted": vs_scripted,
+                        "vs_scripted_matches": scripted_matches,
+                        "policy_loss": stats["policy_loss"],
+                        "value_loss": stats["value_loss"],
+                        "entropy": stats["entropy"],
+                        "approx_kl": stats["approx_kl"],
+                        "clip_frac": stats["clip_frac"],
+                        "entropy_coef": entropy_coef,
+                        "lr": lr_now,
+                    })
+
                 recent_returns.clear()
                 recent_wins = 0
                 recent_matches = 0
@@ -947,6 +1004,7 @@ def main():
                     log.exception("could not save the exit checkpoint")
             if env is not None:
                 env.close()
+            metrics.close()
             if sim_config_path and os.path.isfile(sim_config_path):
                 os.unlink(sim_config_path)
         finally:

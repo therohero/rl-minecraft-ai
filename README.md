@@ -195,6 +195,18 @@ checkpoint stores the trunk shape, `obs_dim`, the sim constants it trained
 against, and the full `SimConfig` - resuming refuses to load if the
 architecture or observation space no longer matches.
 
+### Metrics
+
+The progress line (every `--log-every` updates, default 10) carries the
+rolling return, win rate, `win_vs_scripted`, the PPO losses, entropy,
+approximate KL and clip fraction, plus steps/sec. `--metrics-csv [path]`
+also writes those as a CSV (one row per line, appended under the existing
+header on resume; no extra dependency); `--tensorboard [dir]` mirrors them
+to a TensorBoard event dir when the `tensorboard` package is installed (a
+missing package is a one-line warning, not an error). Both default to
+`<checkpoint-dir>/metrics.csv` / `<checkpoint-dir>/tb` when given without
+an argument.
+
 ### Rating a checkpoint (`evaluate.py`)
 
 `win_vs_scripted` in the training log is the only strength signal that
@@ -248,8 +260,9 @@ it runs the actual Rust sim and `train.py` twice on a tiny config (few
 arenas, short rollouts, a handful of updates) against a throwaway
 checkpoint dir, then asserts on the run's logs and the checkpoint/league
 files it leaves behind — a fresh run trains and checkpoints, a second run
-resumes from `latest.pt` at the right update, then `evaluate.py` rates the
-resulting checkpoints and prints an Elo table. Needs the sim built once
+resumes from `latest.pt` at the right update (also checking the
+`--metrics-csv` output), then `evaluate.py` rates the resulting
+checkpoints and prints an Elo table. Needs the sim built once
 (`cd training/sim && cargo build --release`).
 
 The `pytest` suite cross-checks the inference bridge's per-observation
