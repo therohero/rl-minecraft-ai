@@ -171,7 +171,9 @@ downstream to the live bots.
    over `--total-updates`.
 4. Sync `collect_model` from the updated weights; every
    `--opponent-snapshot-every` updates, freeze a snapshot into the league
-   pool.
+   pool. The pool is mirrored to `training/checkpoints/league/` and reloaded
+   on resume, so a restarted run doesn't start with an empty league
+   (`--fresh` wipes it with the checkpoints).
 
 The rollout is latency-bound (one UDP round-trip per step), so it runs on
 few torch threads (`--torch-threads`); the update is a big batched matmul

@@ -472,9 +472,9 @@ def main():
         "opponents / league",
         "Widen the self-play opponent beyond a live mirror of the current "
         "policy, so it doesn't converge to something only a copy of itself "
-        "can't punish. The pool is runtime-only: a resumed run restarts it "
-        "empty (the scripted bot is always available) and refills it over "
-        "--opponent-snapshot-every updates.",
+        "can't punish. The pool is persisted to <checkpoint-dir>/league/ and "
+        "reloaded on resume (the scripted bot is always available); --fresh "
+        "wipes it along with the checkpoints.",
     )
     league.add_argument(
         "--opponent-fraction",
@@ -620,6 +620,7 @@ def main():
 
     env = None
     model = None
+    pool = None
     optimizer = None
     last_update_completed = 0
     last_saved_update = 0
@@ -723,7 +724,10 @@ def main():
                 obs_dim, hidden_size=args.hidden_size, num_layers=args.num_layers, slot_dim=slot_dim
             ),
             capacity=args.opponent_pool_size,
+            snapshot_dir=os.path.join(args.checkpoint_dir, "league"),
         )
+        if not args.fresh:
+            pool.load()
         learner_slots = opponent_slot_mask(num_slots // env.players_per_arena, env.players_per_arena, args.opponent_fraction)
         bench_slots = benchmark_slot_mask(num_slots // env.players_per_arena, env.players_per_arena, args.opponent_fraction)
         opp_idx = np.nonzero(~learner_slots)[0]
@@ -967,11 +971,15 @@ def _numbered_checkpoints(checkpoint_dir: str) -> list[tuple[int, str]]:
 def _wipe_checkpoints(checkpoint_dir: str) -> int:
     """Deletes `latest.pt` and every numbered snapshot in `checkpoint_dir`.
     Returns the number of files removed. Used by `--fresh`."""
+    import glob
+
     removed = 0
     paths = [p for _, p in _numbered_checkpoints(checkpoint_dir)]
     latest = os.path.join(checkpoint_dir, "latest.pt")
     if os.path.isfile(latest):
         paths.append(latest)
+    # The opponent-league snapshots are part of the run state too.
+    paths += glob.glob(os.path.join(checkpoint_dir, "league", "snapshot_*.pt"))
     for path in paths:
         try:
             os.remove(path)

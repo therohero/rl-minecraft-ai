@@ -6,9 +6,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Training
 
-- [ ] **Persist the opponent league.** `opponents.py` pool is runtime-only —
-  a resumed run restarts it empty and refills over ~25 updates. Snapshot the
-  frozen policies to `training/checkpoints/league/` and reload on resume.
 - [ ] **Evaluation harness.** `win_vs_scripted` is the only non-circular
   signal. Add an eval mode that plays the current checkpoint against a ladder
   of past checkpoints + the scripted bot and reports a TrueSkill/ELO number.

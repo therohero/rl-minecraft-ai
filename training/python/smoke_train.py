@@ -112,9 +112,13 @@ def main() -> int:
         _require(len(numbered) <= 2, f"--keep-checkpoints 2 not honoured: {numbered}", log1)
         _require("added policy snapshot to opponent pool" in log1,
                  "no opponent-league snapshot was frozen during the fresh run", log1)
+        league = os.path.join(ckpt, "league")
+        persisted = sorted(f for f in os.listdir(league)) if os.path.isdir(league) else []
+        _require(bool(persisted), "opponent league was not persisted to checkpoints/league/", log1)
+        _require(len(persisted) <= 3, f"--opponent-pool-size 3 not honoured on disk: {persisted}", log1)
         _require(_last_update_in_log(log1) == FRESH_UPDATES,
                  f"fresh run stopped at update {_last_update_in_log(log1)}, expected {FRESH_UPDATES}", log1)
-        print(f"      ok: latest.pt + {len(numbered)} numbered snapshot(s), league snapshots frozen")
+        print(f"      ok: latest.pt + {len(numbered)} numbered snapshot(s) + {len(persisted)} league snapshot(s)")
 
         print(f"[2/2] resume run: continue to {RESUME_UPDATES} updates")
         log2 = _run_training(sim_binary, ckpt, RESUME_UPDATES, fresh=False)
@@ -122,9 +126,11 @@ def main() -> int:
         _require(m is not None, "resume run did not log 'resumed from ... at update=<n>'", log2)
         _require(int(m.group(1)) == FRESH_UPDATES + 1,
                  f"resumed at update={m.group(1)}, expected {FRESH_UPDATES + 1}", log2)
+        _require(re.search(r"loaded \d+ opponent-league snapshot", log2) is not None,
+                 "resume run did not reload the persisted opponent league", log2)
         _require(_last_update_in_log(log2) == RESUME_UPDATES,
                  f"resume run stopped at update {_last_update_in_log(log2)}, expected {RESUME_UPDATES}", log2)
-        print("      ok: resumed from latest.pt at the right update and ran on")
+        print("      ok: resumed from latest.pt at the right update, reloaded the league, ran on")
 
         print("\nSMOKE OK - training loop is healthy")
         return 0
