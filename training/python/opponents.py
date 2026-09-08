@@ -25,10 +25,17 @@ what `env.step` expects.
 
 from __future__ import annotations
 
+import glob
+import os
+
 import numpy as np
 import torch
 
 import features
+
+from logging_setup import get_logger
+
+log = get_logger(__name__)
 
 
 def enemy0_offset() -> int:
@@ -118,12 +125,20 @@ class OpponentPool:
     """A capped, rolling pool of frozen policy snapshots plus one shared
     `ScriptedOpponent`. Cheap: a snapshot is just CPU state-dict tensors, and
     only one extra `ActorCritic` is ever instantiated (reused across draws).
+
+    When `snapshot_dir` is set the pool is *persistent*: every `add_snapshot`
+    mirrors the whole rolling set to `snapshot_dir/snapshot_<i>.pt`, and
+    `load()` repopulates it on a resumed run so the league doesn't restart
+    empty and spend ~`capacity * --opponent-snapshot-every` updates refilling.
     """
 
-    def __init__(self, make_model, capacity: int) -> None:
+    _FILE_GLOB = "snapshot_*.pt"
+
+    def __init__(self, make_model, capacity: int, snapshot_dir: str | None = None) -> None:
         """`make_model`: `() -> ActorCritic` (on CPU, eval-mode is set here)."""
         self._make_model = make_model
         self.capacity = max(int(capacity), 0)
+        self.snapshot_dir = snapshot_dir
         self._snapshots: list[dict] = []
         self._infer = None
         self.scripted = ScriptedOpponent()
@@ -138,6 +153,50 @@ class OpponentPool:
         self._snapshots.append(sd)
         if len(self._snapshots) > self.capacity:
             self._snapshots.pop(0)
+        self.save()
+
+    def save(self) -> None:
+        """Mirror the current rolling set to `snapshot_dir` (no-op without one).
+        Rewrites the small `snapshot_<i>.pt` files (a handful of tiny CPU
+        state-dicts, written every `--opponent-snapshot-every` updates) and
+        prunes any stale higher-index files left by a larger past pool."""
+        if not self.snapshot_dir or self.capacity == 0:
+            return
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+        for i, sd in enumerate(self._snapshots):
+            path = os.path.join(self.snapshot_dir, f"snapshot_{i:03d}.pt")
+            tmp = path + ".tmp"
+            torch.save(sd, tmp)
+            os.replace(tmp, path)
+        for path in glob.glob(os.path.join(self.snapshot_dir, self._FILE_GLOB)):
+            name = os.path.basename(path)
+            try:
+                idx = int(name[len("snapshot_") : -len(".pt")])
+            except ValueError:
+                continue
+            if idx >= len(self._snapshots):
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    log.warning("could not prune stale league snapshot %s: %s", path, e)
+
+    def load(self) -> int:
+        """Repopulate the pool from `snapshot_dir`. Keeps the newest `capacity`
+        snapshots (files sort oldest-first). Corrupt or arch-mismatched files
+        are skipped with a warning. Returns the number loaded."""
+        if not self.snapshot_dir or self.capacity == 0:
+            return 0
+        paths = sorted(glob.glob(os.path.join(self.snapshot_dir, self._FILE_GLOB)))
+        loaded: list[dict] = []
+        for path in paths[-self.capacity :]:
+            try:
+                loaded.append(torch.load(path, map_location="cpu", weights_only=True))
+            except Exception as e:
+                log.warning("skipping unreadable league snapshot %s: %s", path, e)
+        self._snapshots = loaded
+        if loaded:
+            log.info("loaded %d opponent-league snapshot(s) from %s", len(loaded), self.snapshot_dir)
+        return len(loaded)
 
     def choose(self, rng: np.random.Generator, scripted_prob: float):
         """Pick this iteration's opponent.

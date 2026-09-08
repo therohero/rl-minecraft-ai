@@ -100,6 +100,30 @@ def test_pool_snapshot_and_choice():
     assert kind == "net" and isinstance(net, ActorCritic)
 
 
+def test_pool_persists_and_reloads(tmp_path):
+    def make():
+        return ActorCritic(obs_dim=features.OBS_DIM, hidden_size=8, num_layers=1)
+
+    d = str(tmp_path / "league")
+    pool = OpponentPool(make_model=make, capacity=2, snapshot_dir=d)
+    m = make()
+    pool.add_snapshot(m)
+    pool.add_snapshot(m)
+    pool.add_snapshot(m)  # capacity 2 -> two files on disk, oldest dropped
+
+    reloaded = OpponentPool(make_model=make, capacity=2, snapshot_dir=d)
+    assert reloaded.load() == 2
+    assert len(reloaded) == 2
+    kind, net = reloaded.choose(np.random.default_rng(0), scripted_prob=0.0)
+    assert kind == "net" and isinstance(net, ActorCritic)
+
+    # shrinking the pool prunes stale higher-index files on the next save.
+    smaller = OpponentPool(make_model=make, capacity=1, snapshot_dir=d)
+    smaller.load()
+    smaller.add_snapshot(m)
+    assert OpponentPool(make_model=make, capacity=2, snapshot_dir=d).load() == 1
+
+
 def test_ppo_update_sample_mask_drops_masked_slots():
     torch.manual_seed(0)
     T, N, obs_dim = 4, 6, features.OBS_DIM
