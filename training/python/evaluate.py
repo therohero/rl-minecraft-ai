@@ -37,6 +37,7 @@ import torch
 import features
 from device import resolve_device
 from env import DEFAULT_SIM_BINARY, SelfPlayArenaEnv
+from frame_stack import FrameStacker
 from logging_setup import get_logger
 from opponents import ScriptedOpponent
 from ppo_agent import ActorCritic
@@ -72,19 +73,30 @@ def discover_ladder(checkpoint_dir: str, candidate_path: str, max_ladder: int) -
     return numbered
 
 
-def load_policy(path: str, device: torch.device) -> ActorCritic:
+def checkpoint_frame_stack(path: str) -> int:
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return ckpt.get("frame_stack", 1)
+
+
+def load_policy(path: str, device: torch.device, frame_stack: int) -> ActorCritic:
     """Rebuild the exact `ActorCritic` a checkpoint was saved from, in eval
-    mode. Raises if its observation space doesn't match the running sim."""
+    mode. Raises if its observation space or frame-stack depth doesn't match
+    the rest of the ladder (`frame_stack`)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     arch = ckpt.get("arch", {})
-    obs_dim = ckpt.get("obs_dim", features.OBS_DIM)
-    if obs_dim != features.OBS_DIM:
+    ckpt_fs = ckpt.get("frame_stack", 1)
+    if ckpt_fs != frame_stack:
         raise ValueError(
-            f"{os.path.basename(path)} trained with obs_dim={obs_dim}, but this sim config "
+            f"{os.path.basename(path)} trained with --frame-stack {ckpt_fs}, ladder is {frame_stack}"
+        )
+    base = ckpt.get("obs_dim", features.OBS_DIM) // ckpt_fs
+    if base != features.OBS_DIM:
+        raise ValueError(
+            f"{os.path.basename(path)} trained with base obs_dim={base}, but this sim config "
             f"gives obs_dim={features.OBS_DIM} - it can't be judged on the same ladder"
         )
     model = ActorCritic(
-        obs_dim,
+        features.OBS_DIM * frame_stack,
         hidden_size=arch.get("hidden_size", 256),
         num_layers=arch.get("num_layers", 2),
         slot_dim=arch.get("slot_dim", features.HOTBAR_ACTION_DIM),
@@ -161,7 +173,7 @@ def _build_queue(n_players: int, matches_per_pair: int, rng: np.random.Generator
 
 
 def run_tournament(env: SelfPlayArenaEnv, players: list[dict], matches_per_pair: int,
-                   sample: bool, seed: int) -> tuple[np.ndarray, np.ndarray]:
+                   sample: bool, seed: int, frame_stack: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """Play the full round-robin. Returns `(wins, draws)` integer matrices:
     `wins[i, j]` = clean wins of i over j, `draws[i, j] == draws[j, i]`."""
     n = len(players)
@@ -178,7 +190,9 @@ def run_tournament(env: SelfPlayArenaEnv, players: list[dict], matches_per_pair:
     # Per-arena current pairing; None once there's nothing left to play.
     pairing: list[tuple[int, int] | None] = [queue.pop() if queue else None for _ in range(env.num_arenas)]
 
-    obs = torch.as_tensor(env.reset())
+    stacker = FrameStacker(env.num_slots, features.OBS_DIM, frame_stack) if frame_stack > 1 else None
+    cur_obs_np = env.reset()
+    obs = torch.as_tensor(stacker.reset(cur_obs_np) if stacker else cur_obs_np)
     done_matches = 0
     last_pct = -1
     while any(p is not None for p in pairing):
@@ -198,11 +212,12 @@ def run_tournament(env: SelfPlayArenaEnv, players: list[dict], matches_per_pair:
             if idx.size == 0:
                 continue
             if player["kind"] == "scripted":
-                actions[idx] = scripted_bot.actions(obs.numpy()[idx])
+                actions[idx] = scripted_bot.actions(cur_obs_np[idx])
             else:
                 actions[idx] = policy_actions(player["model"], obs[idx], sample)
 
         next_obs, _, dones, info = env.step(actions)
+        cur_obs_np = next_obs
 
         for a, pair in enumerate(pairing):
             if pair is None:
@@ -226,7 +241,7 @@ def run_tournament(env: SelfPlayArenaEnv, players: list[dict], matches_per_pair:
             log.info("  %d%% (%d/%d matches)", pct, done_matches, total)
             last_pct = pct
 
-        obs = torch.as_tensor(next_obs)
+        obs = torch.as_tensor(stacker.push(next_obs, dones) if stacker else next_obs)
 
     return wins, draws
 
@@ -316,6 +331,7 @@ def main() -> int:
     candidate_path = resolve_checkpoint(args.candidate, checkpoint_dir)
     ladder_paths = discover_ladder(checkpoint_dir, candidate_path, args.max_ladder)
     device = resolve_device(args.device)
+    frame_stack = checkpoint_frame_stack(candidate_path)
 
     sim_config_path, owns_config = _sim_config_file(candidate_path, args.sim_config, args.match_time)
 
@@ -329,12 +345,12 @@ def main() -> int:
         )
 
         players: list[dict] = []
-        players.append({"label": f"candidate:{os.path.basename(candidate_path)}",
-                        "kind": "net", "model": load_policy(candidate_path, device), "candidate": True})
+        players.append({"label": f"candidate:{os.path.basename(candidate_path)}", "kind": "net",
+                        "model": load_policy(candidate_path, device, frame_stack), "candidate": True})
         for path in ladder_paths:
             try:
                 players.append({"label": os.path.basename(path), "kind": "net",
-                                "model": load_policy(path, device), "candidate": False})
+                                "model": load_policy(path, device, frame_stack), "candidate": False})
             except ValueError as e:
                 log.warning("skipping ladder checkpoint: %s", e)
         if not args.no_scripted:
@@ -345,11 +361,11 @@ def main() -> int:
             return 2
 
         n_pairs = len(players) * (len(players) - 1) // 2
-        log.info("evaluating %d players (%d pairs x %d matches = %d) on %d arenas, %s actions",
+        log.info("evaluating %d players (%d pairs x %d matches = %d) on %d arenas, %s actions, frame_stack=%d",
                  len(players), n_pairs, args.matches_per_pair, n_pairs * args.matches_per_pair,
-                 args.num_arenas, "sampled" if args.sample else "deterministic")
+                 args.num_arenas, "sampled" if args.sample else "deterministic", frame_stack)
 
-        wins, draws = run_tournament(env, players, args.matches_per_pair, args.sample, args.seed)
+        wins, draws = run_tournament(env, players, args.matches_per_pair, args.sample, args.seed, frame_stack)
         games = wins + wins.T + draws
         elo = bradley_terry_elo(wins + 0.5 * draws, games)
         _print_report(players, wins, draws, elo)

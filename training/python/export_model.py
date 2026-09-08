@@ -73,6 +73,15 @@ def main():
     log.info("loading checkpoint: %s", args.checkpoint)
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
 
+    frame_stack = ckpt.get("frame_stack", 1)
+    if frame_stack != 1:
+        raise SystemExit(
+            f"this checkpoint was trained with --frame-stack {frame_stack}. The live inference "
+            "bridges (azalea-bot, mod) build a single observation frame and don't stack yet, so "
+            "an N>1 checkpoint can't be exported for live play. Train the deployable policy with "
+            "--frame-stack 1, or implement live frame stacking first (see TODO.md)."
+        )
+
     # Restore the exact sim-side normalization constants and trunk shape this
     # checkpoint was trained with, so the exported policy + spec.json match.
     sim_constants = ckpt.get("sim_constants", {})
@@ -168,6 +177,10 @@ def main():
 
     spec = {
         "obs_dim": obs_dim,
+        # 1 for every deployable checkpoint today; the live bridges assume it
+        # and export refuses anything else. Present so a future live
+        # frame-stacking path has the depth to read.
+        "frame_stack": frame_stack,
         "obs_field_order": obs_field_order,
         "kit": sim_config.get("kit"),
         "team_size": sim_config.get("team_size"),

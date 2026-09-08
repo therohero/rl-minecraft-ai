@@ -191,9 +191,22 @@ on **any** exit - normal finish, `Ctrl+C`, or crash (with `SIGINT` ignored
 for that critical section so an impatient second `Ctrl+C` can't corrupt
 it). Re-running `./run.sh` with the same command resumes from `latest.pt`
 (model + optimizer state + update count); `--fresh` wipes everything. A
-checkpoint stores the trunk shape, `obs_dim`, the sim constants it trained
-against, and the full `SimConfig` - resuming refuses to load if the
-architecture or observation space no longer matches.
+checkpoint stores the trunk shape, `obs_dim`, `frame_stack`, the sim
+constants it trained against, and the full `SimConfig` - resuming refuses
+to load if the architecture, observation space or frame-stack depth no
+longer matches.
+
+### Frame stacking (`--frame-stack N`)
+
+The trunk is a memoryless MLP, but the sim is a POMDP - the view of the
+other players is latency-delayed and occlusion-limited. `--frame-stack N`
+(default 1) feeds the policy the last `N` observations concatenated, so
+the same MLP gets a short history at `N`x the input width, with no
+recurrent state and no change to the PPO update. A slot's history is
+cleared the tick its match ends. `evaluate.py` picks the depth up from
+the candidate checkpoint. The live inference bridges (`azalea-bot`, `mod`)
+build a single frame and don't stack yet, so `export_model.py` refuses an
+`N>1` checkpoint - train the deployable policy with `--frame-stack 1`.
 
 ### Metrics
 
