@@ -314,6 +314,33 @@ pub struct CombatConfig {
     pub lava_damage_rate: f32,
     pub lava_burn_seconds: f32,
     pub lava_burn_rate: f32,
+
+    // --- splash potions (opt-in per config via `SimConfig::splash_potions`;
+    //     effect model in `effects.rs`, flight/AoE in `projectile.rs`) ---
+    /// Launch speed (blocks/tick) of a thrown splash potion.
+    pub splash_potion_speed: f32,
+    /// Per-tick downward acceleration on a potion in flight.
+    pub splash_potion_gravity: f32,
+    /// Per-tick velocity multiplier (drag) on a potion in flight.
+    pub splash_potion_drag: f32,
+    /// Radius (blocks) of the splash cloud on impact. A caught player's
+    /// effect strength scales linearly from full at the centre to nothing
+    /// at this distance (vanilla `1 - dist/4`).
+    pub splash_radius: f32,
+    /// Direct-hit duration (seconds) of each timed splash effect, before the
+    /// distance falloff. Instant Health / Damage scale magnitude instead.
+    pub potion_speed_seconds: f32,
+    pub potion_strength_seconds: f32,
+    pub potion_poison_seconds: f32,
+    /// Amplifier (0 = level I) each splash potion applies.
+    pub potion_speed_amplifier: u32,
+    pub potion_strength_amplifier: u32,
+    pub potion_poison_amplifier: u32,
+    pub potion_healing_amplifier: u32,
+    pub potion_harming_amplifier: u32,
+    /// Instant Health / Damage HP at amplifier 0 (doubled per level).
+    pub instant_health_hp: f32,
+    pub instant_damage_hp: f32,
 }
 
 impl Default for CombatConfig {
@@ -416,8 +443,36 @@ impl Default for CombatConfig {
             lava_damage_rate: 4.0,
             lava_burn_seconds: 5.0,
             lava_burn_rate: 1.0,
+
+            splash_potion_speed: 0.5,
+            splash_potion_gravity: 0.05,
+            splash_potion_drag: 0.99,
+            splash_radius: 4.0,
+            potion_speed_seconds: 30.0,
+            potion_strength_seconds: 30.0,
+            potion_poison_seconds: 11.0,
+            potion_speed_amplifier: 1,     // splash Speed II
+            potion_strength_amplifier: 0,  // Strength I
+            potion_poison_amplifier: 0,    // Poison I
+            potion_healing_amplifier: 1,   // splash Healing II
+            potion_harming_amplifier: 0,   // Harming I
+            instant_health_hp: 4.0,        // Healing I = 4, II = 8
+            instant_damage_hp: 6.0,        // Harming I = 6, II = 12
         }
     }
+}
+
+/// Splash-potion counts a player spawns with. Every field defaults to 0 -
+/// no kit carries potions unless a config asks for them, so existing
+/// training runs and checkpoints are unaffected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SplashPotionLoadout {
+    pub healing: u32,
+    pub harming: u32,
+    pub poison: u32,
+    pub speed: u32,
+    pub strength: u32,
 }
 
 /// Which combat kit both teams play. `sword` is the classic 1v1 loadout
@@ -593,6 +648,10 @@ pub struct SimConfig {
     /// Per-tick jitter (ms, +/-) added to `base_ping_ms` for the reported /
     /// applied ping.
     pub ping_jitter_ms: f32,
+    /// Splash-potion counts every player spawns with. All-zero by default
+    /// (no kit carries potions); set any field to hand that potion to both
+    /// teams. See `SplashPotionLoadout` and `effects.rs`.
+    pub splash_potions: SplashPotionLoadout,
     pub combat: CombatConfig,
     pub reward: RewardConfig,
 }
@@ -626,6 +685,7 @@ impl Default for SimConfig {
             min_ping_ms: 5.0,
             max_ping_ms: 100.0,
             ping_jitter_ms: 15.0,
+            splash_potions: SplashPotionLoadout::default(),
             combat: CombatConfig::default(),
             reward: RewardConfig::default(),
         }
@@ -727,6 +787,34 @@ mod tests {
         let mut legacy = SimConfig::default();
         legacy.normalize();
         assert!(legacy.attribute_swapping);
+    }
+
+    #[test]
+    fn no_kit_carries_splash_potions_by_default() {
+        let cfg = SimConfig::default();
+        let sp = cfg.splash_potions;
+        assert_eq!((sp.healing, sp.harming, sp.poison, sp.speed, sp.strength), (0, 0, 0, 0, 0));
+        for kit in [Kit::Sword, Kit::Axe, Kit::Uhc] {
+            let l = crate::kit::loadout(kit);
+            for it in [
+                crate::kit::Item::SplashHealing,
+                crate::kit::Item::SplashHarming,
+                crate::kit::Item::SplashPoison,
+                crate::kit::Item::SplashSpeed,
+                crate::kit::Item::SplashStrength,
+            ] {
+                assert_eq!(l.counts[it.index()], 0, "{kit:?} must not carry {it:?} by default");
+            }
+        }
+    }
+
+    #[test]
+    fn a_config_can_hand_out_splash_potions() {
+        let cfg: SimConfig =
+            serde_json::from_str(r#"{ "splash_potions": { "poison": 3, "speed": 1 } }"#).unwrap();
+        assert_eq!(cfg.splash_potions.poison, 3);
+        assert_eq!(cfg.splash_potions.speed, 1);
+        assert_eq!(cfg.splash_potions.healing, 0);
     }
 
     #[test]

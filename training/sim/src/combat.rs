@@ -81,6 +81,9 @@ pub struct AttackerState {
     pub dist_moved_last_tick: f32,
     /// Seconds since this attacker last swung.
     pub time_since_last_attack: f32,
+    /// Flat melee-damage delta from Strength / Weakness (see `effects`),
+    /// added to the weapon base before the attack-charge multiplier.
+    pub effect_damage_add: f32,
 }
 
 /// The subset of target state needed to resolve a melee attack.
@@ -162,7 +165,8 @@ pub fn resolve_attack(
     let combat = &cfg().combat;
 
     let strength = strength_scale(attacker.time_since_last_attack, weapon.recharge_seconds);
-    let mut damage = (weapon.base_damage + weapon.sharpness_bonus) * damage_multiplier(strength);
+    let mut damage = (weapon.base_damage + weapon.sharpness_bonus + attacker.effect_damage_add).max(0.0)
+        * damage_multiplier(strength);
 
     // Vanilla crit: falling, not on the ground, not in water, not sprinting,
     // and a nearly-full swing.
@@ -313,6 +317,7 @@ pub(crate) fn resolve_melee(
         in_water: world.player_contact(players[i].pos).water,
         dist_moved_last_tick: players[i].dist_moved_last_tick,
         time_since_last_attack: strength_time,
+        effect_damage_add: players[i].effects.attack_damage_add(),
     };
     let same_team = players[i].team == players[tj].team;
     let friendly_fire = cfg().friendly_fire;
@@ -454,6 +459,7 @@ mod tests {
             in_water: false,
             dist_moved_last_tick: 0.0,
             time_since_last_attack: crate::player::FULLY_CHARGED,
+            effect_damage_add: 0.0,
         }
     }
 

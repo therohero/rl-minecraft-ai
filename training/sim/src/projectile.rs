@@ -10,11 +10,24 @@ use rand::Rng;
 
 use crate::arena::StepEvents;
 use crate::blocks::BlockWorld;
-use crate::combat::{self};
+use crate::combat::{self, MAX_HP};
 use crate::config::cfg;
-use crate::physics::{look_direction, Aabb, Vec3, EYE_HEIGHT};
+use crate::effects::Effect;
+use crate::kit::Item;
+use crate::physics::{look_direction, Aabb, Vec3, DT, EYE_HEIGHT};
 use crate::player::{delay_back, Player, MAX_DELAY_TICKS};
 use crate::terrain::Terrain;
+
+/// What kind of projectile this is - arrows and thrown splash potions share
+/// the ballistic flight loop but resolve their impact completely differently.
+#[derive(Clone, Copy)]
+pub enum ProjectileKind {
+    Arrow,
+    /// A thrown splash potion: on the first solid/entity contact it breaks
+    /// and applies `effect` (at `amplifier`) to every player within
+    /// `cfg().combat.splash_radius`, scaled by distance.
+    SplashPotion { effect: Effect, amplifier: u8 },
+}
 
 /// A shot the policy queued this tick (a released bow / fired crossbow),
 /// consumed by `Arena::step` which owns the projectile list.
@@ -30,6 +43,7 @@ pub struct PendingShot {
 
 #[derive(Clone)]
 pub struct Projectile {
+    pub kind: ProjectileKind,
     pub pos: Vec3,
     pub vel: Vec3,
     pub owner: usize,
@@ -103,6 +117,7 @@ pub(crate) fn spawn(
         vel.y += shooter.vel.y;
     }
     projectiles.push(Projectile {
+        kind: ProjectileKind::Arrow,
         pos: eye,
         vel,
         owner,
@@ -113,6 +128,113 @@ pub(crate) fn spawn(
         life_ticks: 0,
         history: VecDeque::new(),
     });
+}
+
+/// Throw a splash potion `item` from `thrower`'s eye, consuming one from
+/// `counts`. A no-op if none are left or the item isn't a splash potion.
+pub(crate) fn spawn_splash(
+    projectiles: &mut Vec<Projectile>,
+    thrower: &mut Player,
+    owner: usize,
+    item: Item,
+    _rng: &mut StdRng,
+) {
+    let Some((effect, amplifier)) = Effect::from_splash_item(item) else {
+        return;
+    };
+    if thrower.counts[item.index()] == 0 {
+        return;
+    }
+    thrower.counts[item.index()] -= 1;
+
+    let c = &cfg().combat;
+    let eye = Vec3::new(thrower.pos.x, thrower.pos.y + EYE_HEIGHT, thrower.pos.z);
+    let dir = look_direction(thrower.yaw, thrower.pitch);
+    // Vanilla thrown potions launch at a modest speed with a slight downward
+    // bias (`-20deg` pitch offset); model it as a plain look-direction throw.
+    let mut vel = Vec3::new(dir.x * c.splash_potion_speed, dir.y * c.splash_potion_speed, dir.z * c.splash_potion_speed);
+    vel.x += thrower.vel.x;
+    vel.z += thrower.vel.z;
+    if !thrower.on_ground {
+        vel.y += thrower.vel.y;
+    }
+    projectiles.push(Projectile {
+        kind: ProjectileKind::SplashPotion { effect, amplifier },
+        pos: eye,
+        vel,
+        owner,
+        owner_team: thrower.team,
+        base_damage: 0.0,
+        piercing_left: 0,
+        hit: Vec::new(),
+        life_ticks: 0,
+        history: VecDeque::new(),
+    });
+}
+
+/// Apply a broken splash potion's `effect` at `center` to every living
+/// player, with vanilla linear distance falloff over `splash_radius`.
+fn apply_splash(
+    effect: Effect,
+    amplifier: u8,
+    center: Vec3,
+    owner: usize,
+    owner_team: u8,
+    players: &mut [Player],
+    ev: &mut [StepEvents],
+) {
+    let c = &cfg().combat;
+    let radius = c.splash_radius.max(1e-3);
+    let ff = cfg().friendly_fire;
+    for j in 0..players.len() {
+        if !players[j].alive() {
+            continue;
+        }
+        let d = Vec3::new(
+            players[j].pos.x - center.x,
+            players[j].pos.y - center.y,
+            players[j].pos.z - center.z,
+        );
+        let dist = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+        if dist > radius {
+            continue;
+        }
+        let scale = 1.0 - dist / radius; // 1 at the centre, 0 at the edge
+
+        let same_team = players[j].team == owner_team;
+        let is_self = j == owner;
+        // A harmful effect on an ally is gated by friendly fire; on yourself
+        // it always lands (vanilla - you eat your own splash).
+        if !effect.is_beneficial() && same_team && !is_self && !ff {
+            continue;
+        }
+
+        if effect.is_instant() {
+            let mag = effect.instant_magnitude(amplifier) * scale;
+            match effect {
+                Effect::InstantHealth => {
+                    players[j].hp = (players[j].hp + mag).min(MAX_HP);
+                }
+                Effect::InstantDamage => {
+                    // Magic damage: ignores armour, still runs the i-frame rule.
+                    let applied = players[j].take_damage(mag);
+                    if applied > 0.0 {
+                        ev[j].damage_taken += applied;
+                        if is_self {
+                        } else if same_team {
+                            ev[owner].friendly_damage += applied;
+                        } else {
+                            ev[owner].damage_dealt += applied;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            let ticks = (effect.splash_seconds() * scale / DT) as u32;
+            players[j].effects.apply(effect, amplifier, ticks);
+        }
+    }
 }
 
 /// Advance every projectile one tick and resolve any hits. Dead projectiles
@@ -130,12 +252,16 @@ pub(crate) fn step_all(
     let arena_r = cfg().arena_radius + 2.0;
     let mut idx = 0;
     while idx < projectiles.len() {
+        let (grav, drag) = match projectiles[idx].kind {
+            ProjectileKind::Arrow => (c.arrow_gravity, c.arrow_drag),
+            ProjectileKind::SplashPotion { .. } => (c.splash_potion_gravity, c.splash_potion_drag),
+        };
         let (old, new_pos) = {
             let pr = &mut projectiles[idx];
-            pr.vel.y -= c.arrow_gravity;
-            pr.vel.x *= c.arrow_drag;
-            pr.vel.y *= c.arrow_drag;
-            pr.vel.z *= c.arrow_drag;
+            pr.vel.y -= grav;
+            pr.vel.x *= drag;
+            pr.vel.y *= drag;
+            pr.vel.z *= drag;
             let old = pr.pos;
             pr.pos = Vec3::new(pr.pos.x + pr.vel.x, pr.pos.y + pr.vel.y, pr.pos.z + pr.vel.z);
             pr.life_ticks += 1;
@@ -149,6 +275,35 @@ pub(crate) fn step_all(
             || r2 > arena_r * arena_r
             || projectiles[idx].life_ticks > 200
             || world.ray_blocked(old, seg, 1.0, terrain);
+
+        // A splash potion breaks on the first solid or entity contact, dumps
+        // its cloud, and is done - no per-target damage loop.
+        if let ProjectileKind::SplashPotion { effect, amplifier } = projectiles[idx].kind {
+            let owner = projectiles[idx].owner;
+            let mut impact = if dead { Some(old) } else { None };
+            if impact.is_none() {
+                for j in 0..n {
+                    if j == owner || !players[j].alive() {
+                        continue;
+                    }
+                    let box_j = Aabb::player_at(players[j].pos).inflate(0.3);
+                    if let Some(t) = box_j.ray_intersect(old, seg) {
+                        if t <= 1.0 {
+                            impact = Some(Vec3::new(old.x + seg.x * t, old.y + seg.y * t, old.z + seg.z * t));
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(pt) = impact {
+                let team = projectiles[idx].owner_team;
+                apply_splash(effect, amplifier, pt, owner, team, players, ev);
+                projectiles.swap_remove(idx);
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
 
         if !dead {
             // Nearest player the segment enters this tick.
@@ -275,6 +430,66 @@ mod tests {
         assert!(spread_x > 0.0, "there is some spread");
         assert!(spread_x < 0.2, "but it is bounded: {spread_x}");
         assert!(zs.iter().any(|&(x, _)| x != zs[0].0), "not identical every shot");
+    }
+
+    #[test]
+    fn a_thrown_splash_poison_poisons_and_chips_a_nearby_target() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut thrower = shooter();
+        thrower.counts[Item::SplashPoison.index()] = 2;
+        let mut target = Player::new(1);
+        target.pos = Vec3::new(0.0, 0.0, 3.0); // straight ahead, inside the cloud
+        let mut ps = Vec::new();
+        spawn_splash(&mut ps, &mut thrower, 0, Item::SplashPoison, &mut rng);
+        assert_eq!(thrower.counts[Item::SplashPoison.index()], 1, "one potion consumed");
+        assert_eq!(ps.len(), 1);
+
+        let mut players = [thrower, target];
+        let terrain = Terrain::flat();
+        let world = BlockWorld::default();
+        let mut ev = [StepEvents::default(); 2];
+        for _ in 0..30 {
+            step_all(&mut ps, &mut players, &world, &terrain, &mut ev);
+            if ps.is_empty() {
+                break;
+            }
+        }
+        assert!(ps.is_empty(), "the potion broke on impact");
+        assert!(players[1].effects.has(Effect::Poison), "target is poisoned");
+        // Let the poison tick a few times and confirm it costs HP but not the last point.
+        players[1].hp = 3.0;
+        let mut lost = 0.0;
+        for _ in 0..200 {
+            let (_, p) = players[1].effects.tick();
+            if p > 0.0 && players[1].hp > 1.0 {
+                let d = p.min(players[1].hp - 1.0);
+                players[1].hp -= d;
+                lost += d;
+            }
+        }
+        assert!(lost > 0.0 && players[1].hp >= 1.0, "poison chipped {lost} HP, never lethal");
+    }
+
+    #[test]
+    fn a_splash_speed_on_yourself_speeds_you_up() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let mut p = shooter();
+        p.counts[Item::SplashSpeed.index()] = 1;
+        p.pitch = 1.4; // look almost straight down so it lands at our feet
+        let mut ps = Vec::new();
+        spawn_splash(&mut ps, &mut p, 0, Item::SplashSpeed, &mut rng);
+        let mut players = [p];
+        let terrain = Terrain::flat();
+        let world = BlockWorld::default();
+        let mut ev = [StepEvents::default(); 1];
+        for _ in 0..20 {
+            step_all(&mut ps, &mut players, &world, &terrain, &mut ev);
+            if ps.is_empty() {
+                break;
+            }
+        }
+        assert!(players[0].effects.has(Effect::Speed));
+        assert!(players[0].effects.move_multiplier() > 1.0);
     }
 
     #[test]

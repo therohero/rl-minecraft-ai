@@ -39,7 +39,7 @@ def _self_dict_from_raw(raw):
         "self_arrows", "self_slot", "self_swap_lockout", "self_food",
         "self_sneaking", "self_mining",
     ]
-    assert len(keys) == features.OBS_SELF_FLOATS
+    assert len(keys) == features.OBS_SELF_SCALARS
     d = {k: float(v) for k, v in zip(keys, raw)}
     d["self_on_ground"] = bool(raw[6])
     return d
@@ -77,6 +77,7 @@ def _build_raw_and_obs(consts: SimConstants):
     self_raw = take(features.OBS_SELF_FLOATS)
     self_raw[6] = 1.0  # on_ground is 0/1
     obs.update(_self_dict_from_raw(self_raw))
+    obs["self_effects"] = list(self_raw[features.OBS_SELF_SCALARS : features.OBS_SELF_FLOATS])
 
     obs["inventory"] = list(take(features.OBS_INVENTORY_FLOATS))
     obs["hotbar"] = list(take(features.OBS_HOTBAR_FLOATS))

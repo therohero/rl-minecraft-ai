@@ -54,10 +54,18 @@ to train a policy against:
   diamond pickaxe** (mines placed blocks - see below), golden apples &
   heads, placeable planks/cobweb/water/lava, and (inherently) no natural
   regen. Weapons, enchants and armour come from `kit.rs`.
+- **splash potions** (`effects.rs`, `--config splash_potions`): thrown with
+  `use_item`, they arc under gravity and break on the first solid/entity
+  contact, applying a status effect in a `splash_radius` cloud with linear
+  distance falloff. Five types - Healing, Harming, Poison, Speed, Strength -
+  driving the vanilla effect table (Speed/Slowness move ±%, Strength/Weakness
+  flat melee ±, Regeneration/Poison HP-over-time, Instant Health/Damage,
+  Fire Resistance). **No kit carries potions by default** - a config's
+  `splash_potions: { poison: 2, ... }` hands them to both teams.
 - **a 9-slot physical hotbar** (`kit.rs::HOTBAR_SLOTS`): the held-item
   action (`HOTBAR_ACTION_DIM` = 9 + `ITEM_COUNT` classes) either selects a
   *slot* (key 1-9) or **hotkeys** an owned item into the selected slot (the
-  vanilla number-key swap - so all 11 kit items are reachable past 9 slots;
+  vanilla number-key swap - so every kit item is reachable past 9 slots;
   a hotkey'd item that's displaced stays in the inventory). The policy
   observes the layout + its selected slot. Selecting an empty slot is a
   real empty-hand state, and any hotbar op cancels a raised shield / bow
@@ -238,6 +246,7 @@ them. Slots come out in team order per arena: team 0's members, then team 1's.
   `num_arenas`, `players_per_arena`, `team_size`, `kit`, `item_count`
   (the `inventory` block width), `hotbar_slots` (the `hotbar` obs block
   width), `hotbar_action_dim` (the held-slot action head width),
+  `effect_count` (the `self_effects` block width),
   `obs_floats_per_slot`, `tick_dt`, every observation-normalization
   constant, and the full resolved `SimConfig`, so the Python side never
   hand-copies a value.
@@ -288,7 +297,7 @@ correctly:
     match ended, `randomize_spawns` re-rolls terrain + spawns *in place* -
     the "instant reset" the training loop needs.
 
-## Observation layout (wire row, `WIRE_VERSION 8`)
+## Observation layout (wire row, `WIRE_VERSION 9`)
 
 `Observation::write_wire` emits a flat `f32` row in exactly this order;
 `python/features.py::wire_batch_to_obs` decodes it 1:1. Widths marked `×k`
@@ -297,7 +306,8 @@ repeat for the nearest `k` (short lists zero-padded; `present` flag first).
 | block | floats | contents |
 |---|---|---|
 | self | 27 | hp, vel xyz, yaw, pitch, on_ground, attack_cooldown, ping_ms, shield, dist_from_center, ground_height, slope_forward, slope_right, hurt, held, absorption, eating, bow_draw, burning, shield_disabled, arrows, slot, swap_lockout, food, sneaking, mining |
-| inventory | `ITEM_COUNT-1` = 11 | per-item counts (sword…golden_head), clamped + normalized |
+| self_effects | `EFFECT_COUNT` = 9 | `amplifier + 1` while active else 0, per `effects.rs::Effect`: speed, slowness, strength, weakness, regeneration, poison, instant_health, instant_damage, fire_resistance (the two instants never persist ⇒ always 0) |
+| inventory | `ITEM_COUNT-1` = 16 | per-item counts (sword…golden_head, then the 5 splash potions), clamped + normalized |
 | hotbar | `HOTBAR_SLOTS` = 9 | the kit's slot→item id layout |
 | enemies | 13 × `max_observed_enemies` | present, hp+absorption, rel xyz (yaw-rotated), vel xyz, ground_height, blocking, eating, held_ranged, sneaking |
 | teammates | 13 × `max_observed_teammates` | same shape as an enemy block |
@@ -321,7 +331,8 @@ event floats.
 | `src/player.rs` | the `Player` entity and its whole per-tick self-update: input (look / hotbar / item use), physics integration (`integrate` - gravity/swim, then `collision::move_with_collision`; the pre-move block contact is sampled once by `arena` and passed in), the hunger / saturation / exhaustion economy, environmental effects (`apply_block_effects`, incl. fluid push), consumables, damage application, spawn / respawn, the per-tick public-state snapshot ring that laggy observers read |
 | `src/collision.rs` | vanilla per-axis AABB move against the voxel world: swept-box candidate gather (`solid_boxes`), Y/X/Z clip, the 0.6 `maxUpStep` step-up, the sneak edge back-off, and `push_out_of_solids` |
 | `src/combat.rs` | melee: `resolve_melee` (eye-ray target pick against the attacker's ping-delayed view of others, then a server-side reach re-check against the target's current position, damage + knockback, sprint-reset, attack exhaustion, sweep AoE), per-weapon stats, attack-charge scaling, crit (falling / not-in-water) / sweep (near-stationary) / sprint classification, shield block (arc), axe disable, i-frame / last-damage rule |
-| `src/projectile.rs` | in-flight arrows / bolts: spawning, ballistic flight, swept-ray collision, damage through armour / shield / i-frames, Piercing, knockback |
+| `src/projectile.rs` | in-flight arrows / bolts **and thrown splash potions**: spawning, ballistic flight, swept-ray collision; arrows deal damage through armour / shield / i-frames + Piercing + knockback, potions break and apply their effect in a `splash_radius` cloud with distance falloff |
+| `src/effects.rs` | the status-effect table on each `Player` (`StatusEffects`): the 9 `Effect`s, vanilla stacking rules, per-tick Regen/Poison, the move-speed and melee-damage modifiers, and the splash-potion → effect mapping |
 | `src/observation.rs` | `Arena` state -> the wire `Observation` one slot sees (self-relative, nearest few others / arrows, inventory + hotbar, block-grid view, reward + event flags) - the mirror of `training/python/features.py` |
 | `src/kit.rs` | the `Item` enum, `HOTBAR_SLOTS` / `HOTBAR_ACTION_DIM`, and the per-kit loadout (items + counts, the 9-slot hotbar layout, enchant levels, armour) |
 | `src/blocks.rs` | the sparse block grid over the voxel terrain: the unified `is_solid_cell` predicate (terrain ground + placed solids + the implicit `uhc` rim wall), `Cell` (stored `(x,z,y)`-ordered), voxel-DDA ray-blocking + face-offset placement (`raycast_place_target`) + pickaxe mine targeting (`raycast_mine_target` - placed blocks only, never floor/wall), water/lava flow on per-fluid schedules (per-kind selective reflood, reused scratch, skipped when sourceless) + **source-first** drain, flow-vector push, lava+water -> stone/cobblestone/obsidian, fluid/cobweb overlap, `support_y`, the column-view observation |
@@ -342,6 +353,7 @@ the full list. Top-level fields, by area:
 | **input model** | `attribute_swapping`; `input_order` - `legacy` (1.21.11 `hotbar->attack->use`, the default) or `modern` (26.2-pre-2 `attack->use->hotbar`, which forces `attribute_swapping` off and adds a `combat.swap_lockout_seconds` cost per hotbar switch) |
 | **arena** | `arena_radius`, `terrain_max_amplitude`, `terrain_flat_only`, and the rim wall `arena_walls` / `arena_wall_height` (forced on for the `uhc` kit) |
 | **observation** | `max_observed_enemies` / `_teammates` / `_projectiles`, `block_view_size` |
+| **splash potions** | `splash_potions: { healing, harming, poison, speed, strength }` - per-player starting counts, all 0 by default (no kit carries potions) |
 | **latency (domain randomization)** | `min_ping_ms` / `max_ping_ms`, `ping_jitter_ms` |
 | **regularizer** | `max_look_delta` (the per-tick crosshair clamp) |
 | **reward weights** | the `reward` block |
@@ -355,6 +367,9 @@ The `combat` block then holds the fine-grained numbers, grouped roughly as:
   scaling, and mining (`mine_seconds_per_hardness`, `mine_correct_tool_speed`,
   `mine_efficiency_speed_per_level`).
 - **consumables** - golden-apple / head absorption, regen and food.
+- **splash potions** - `splash_potion_speed` / `_gravity` / `_drag`,
+  `splash_radius`, the per-effect `potion_*_seconds` / `potion_*_amplifier`,
+  and `instant_health_hp` / `instant_damage_hp`.
 - **movement economy** - crouch (`sneak_*`), hunger (`*_exhaustion`,
   `min_food_to_sprint`, `*_regen_seconds`), swimming (`swim_*`).
 - **block grid** - `place_reach`, `water_tick_ticks` / `lava_tick_ticks`,
@@ -386,7 +401,8 @@ A few things stay a conscious simplification or a training-only choice:
 - **A voxel world of full blocks only** - no slabs / stairs, so the 0.6
   step-up never fires on terrain (every 1-block step needs a jump), and the
   terrain observation fields are integer block tops.
-- **No potions, Fire Aspect, Flame, Punch, or knockback resistance** - out
-  of scope for the current kits.
+- **Splash potions are modelled but drink potions, Fire Aspect, Flame,
+  Punch and knockback resistance are not** - and no kit carries potions
+  unless a config opts in (`splash_potions`).
 - **The golden head** is a UHC-server item, not vanilla; it lives only in
   the `uhc` kit.

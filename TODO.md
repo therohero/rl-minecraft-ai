@@ -27,6 +27,11 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   Keep the last `N` observations per bot in `azalea_bot` + the mod (clearing
   on match start) and feed the concatenation; read `frame_stack` from
   `spec.json`.
+- [ ] **Live splash potions.** Both bridges report `self_effects` now, but:
+  `azalea_bot` doesn't distinguish a splash potion's contents (maps
+  `ItemKind::SplashPotion` → `Empty`) and neither bridge actually *throws*
+  one on the `use_item` action. Map the potion registry → the 5 ids and
+  make `use_item` with a potion selected throw it.
 - [ ] **Optional binary `/act` body.** Keep HTTP+JSON as the default, but
   accept a flat-`f32` observation body (and return a flat action) on the same
   endpoint for the case where JSON encode/decode ever shows up in the
@@ -45,9 +50,9 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Sim fidelity (`training/sim/`)
 
-- [ ] **Potions / splash potions.** Biggest missing real-PvP mechanic
-  (speed, strength, healing, poison, harming). Model them, but no kit gets
-  them by default — they stay opt-in via sim config.
+- [ ] **Drink potions.** Splash potions are modelled (`effects.rs`,
+  `--config splash_potions`); add the drinkable form (hold `use_item` ~1.6 s,
+  self-only) reusing the same effect table. Still opt-in via config.
 - [ ] **Enchantment gaps.** Fire Aspect, Flame, Punch, knockback resistance —
   none modelled. Model them, but no kit gets them by default (opt-in via
   sim config).

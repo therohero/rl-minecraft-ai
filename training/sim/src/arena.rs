@@ -183,6 +183,9 @@ impl Arena {
             if let Some(item) = self.players[i].pending_place.take() {
                 self.place_from_item(i, item);
             }
+            if let Some(item) = self.players[i].pending_throw.take() {
+                projectile::spawn_splash(&mut self.projectiles, &mut self.players[i], i, item, &mut self.rng);
+            }
 
             let pre_contact = self.world.player_contact(self.players[i].pos);
             let fall = player::integrate(

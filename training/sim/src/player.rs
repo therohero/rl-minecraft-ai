@@ -132,6 +132,11 @@ pub struct Player {
     prev_use_item: bool,
     pub(crate) pending_shot: Option<PendingShot>,
     pub(crate) pending_place: Option<Item>,
+    /// A splash potion the policy released this tick, thrown by `Arena::step`.
+    pub(crate) pending_throw: Option<Item>,
+
+    /// Active potion / status effects (see `effects.rs`).
+    pub effects: crate::effects::StatusEffects,
 
     /// This match's baseline connection latency (ms), rolled once per match.
     pub(crate) base_ping_ms: f32,
@@ -199,6 +204,8 @@ impl Player {
             prev_use_item: false,
             pending_shot: None,
             pending_place: None,
+            pending_throw: None,
+            effects: crate::effects::StatusEffects::default(),
             base_ping_ms: cfg().min_ping_ms,
             ping_ms: cfg().min_ping_ms,
             history: VecDeque::new(),
@@ -243,6 +250,8 @@ impl Player {
         self.prev_use_item = false;
         self.pending_shot = None;
         self.pending_place = None;
+        self.pending_throw = None;
+        self.effects.clear();
         self.history.clear();
         // Kit-derived state.
         self.hotbar = l.hotbar;
@@ -485,6 +494,7 @@ pub(crate) fn apply_input(p: &mut Player, action: &Action) {
     let mut shielding = false;
     p.pending_shot = None;
     p.pending_place = None;
+    p.pending_throw = None;
 
     if p.held.is_ranged() {
         p.eat_progress = 0.0;
@@ -562,6 +572,13 @@ pub(crate) fn apply_input(p: &mut Player, action: &Action) {
         if rising {
             p.pending_place = Some(p.held);
         }
+    } else if p.held.is_splash_potion() {
+        p.bow_draw = 0.0;
+        p.crossbow_load = 0.0;
+        p.eat_progress = 0.0;
+        if rising && p.counts[p.held.index()] > 0 {
+            p.pending_throw = Some(p.held);
+        }
     } else {
         // Melee weapon / empty hand -> use the off-hand shield if we have one.
         p.bow_draw = 0.0;
@@ -611,6 +628,9 @@ pub(crate) fn apply_input(p: &mut Player, action: &Action) {
     } else if p.sneaking {
         accel *= c.sneak_speed_multiplier;
     }
+    // Speed / Slowness scale the movement attribute (vanilla): +20% / -15%
+    // per level, so the drag-equilibrium top speed shifts with it.
+    accel *= p.effects.move_multiplier();
     let fwd = p.forward();
     let right = p.right();
     p.vel.x += (fwd.x * move_z + right.x * move_x) * accel;
@@ -839,20 +859,27 @@ pub(crate) fn apply_block_effects(p: &mut Player, world: &BlockWorld, terrain: &
         p.burn_accum = 0.0;
         p.fall_distance = 0.0;
     }
+    // Fire Resistance: no burn is set and no fire/lava damage lands (the
+    // lava velocity slow is physical, so it still applies).
+    let fire_immune = p.effects.fire_immune();
     if in_lava {
-        p.burn_time_left = c.lava_burn_seconds;
+        if !fire_immune {
+            p.burn_time_left = c.lava_burn_seconds;
+        }
         p.vel.x *= 0.5;
         p.vel.z *= 0.5;
     }
 
     // Accumulate lava + fire damage and apply whole HP through i-frames.
     let mut hp_before_pool = 0.0_f32;
-    if in_lava {
+    if in_lava && !fire_immune {
         hp_before_pool += c.lava_damage_rate * DT;
     }
     if p.burn_time_left > 0.0 {
         p.burn_time_left = (p.burn_time_left - DT).max(0.0);
-        hp_before_pool += c.lava_burn_rate * DT;
+        if !fire_immune {
+            hp_before_pool += c.lava_burn_rate * DT;
+        }
     }
     p.burn_accum += hp_before_pool;
     let mut lost = 0.0;
@@ -866,6 +893,18 @@ pub(crate) fn apply_block_effects(p: &mut Player, world: &BlockWorld, terrain: &
     if p.regen_time_left > 0.0 {
         p.regen_time_left -= DT;
         p.hp = (p.hp + p.regen_rate * DT).min(combat::MAX_HP);
+    }
+
+    // Potion effects: tick timers; Regeneration heals, Poison chips away
+    // (bypasses armour and i-frames, but never reduces below 1 HP).
+    let (potion_heal, potion_poison) = p.effects.tick();
+    if potion_heal > 0.0 {
+        p.hp = (p.hp + potion_heal).min(combat::MAX_HP);
+    }
+    if potion_poison > 0.0 && p.hp > 1.0 {
+        let d = potion_poison.min(p.hp - 1.0);
+        p.hp -= d;
+        lost += d;
     }
 
     // Vanilla hunger-based natural regen: when the `naturalRegeneration`

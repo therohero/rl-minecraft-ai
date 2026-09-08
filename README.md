@@ -99,8 +99,9 @@ definition.
   vanilla per-tick movement/collision on a voxel world, raycast melee with
   the vanilla two-step (client picks off its latency-stale view, server
   re-validates reach), the 1.0 s i-frame window, shields, sweep, bows,
-  three kits, placeable blocks + flowing fluids, hunger, and simulated
-  network latency as a domain-randomization knob. It runs `N` arenas in
+  three kits, placeable blocks + flowing fluids, hunger, opt-in splash
+  potions (9-effect status table), and simulated network latency as a
+  domain-randomization knob. It runs `N` arenas in
   parallel across CPU cores (rayon) and steps as fast as the trainer feeds
   it actions. Full detail in [`training/sim/README.md`](training/sim/README.md).
 

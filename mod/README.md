@@ -164,9 +164,12 @@ format changes. A live server has no equivalent for some sim-only fields:
   clients.
 
 Everything else is read straight off live client state, including
-`self_shield_disabled` (the real item-cooldown manager) and `self_mining`
-(the real interaction manager's block-break flag) - no packet tracking
-needed here, unlike `azalea_bot`'s headless `tracker.rs`.
+`self_shield_disabled` (the real item-cooldown manager), `self_mining`
+(the real interaction manager's block-break flag) and `self_effects` (the
+player's live `StatusEffect` amplifiers) - no packet tracking needed here,
+unlike `azalea_bot`'s headless `tracker.rs`. `KitItem` maps a live splash
+potion to one of the 5 potion ids by its primary effect; the policy can't
+actually throw one yet (see `TODO.md`).
 
 This mod runs an actual vanilla client, so a lot of what `azalea_bot`'s
 `guard.rs` has to fake (physics, hunger cost, attack cooldown) is simply

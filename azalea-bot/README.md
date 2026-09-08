@@ -139,14 +139,16 @@ layers sit between the policy and the server:
   `AutoReconnectPlugin` retries in ~5 s), so a version mismatch shows up as
   a logged loop rather than a silently frozen bot.
 
-`build_observation` maps live Minecraft items onto the training kit's 12
+`build_observation` maps live Minecraft items onto the training kit's 17
 `Item` ids (`Item::from_kind` - diamond/netherite sword → `Sword`,
 enchanted golden apple → `GoldenHead`, …), scans the loaded world for the
 block-top heights and the yaw-rotated `block_view` grid
 (`block_column_view`, a port of `sim/src/blocks.rs::column_view`), reads
-its own tab-list latency for `self_ping_ms`, and asks `mod tracker` for the
-four reconstructed timers. `self_mining` is always 0 (this bot doesn't
-mine) - the field just keeps the wire row the right width.
+its own tab-list latency for `self_ping_ms`, fills `self_effects` from the
+`ActiveEffects` component, and asks `mod tracker` for the four
+reconstructed timers. `self_mining` is always 0 (this bot doesn't mine) -
+the field just keeps the wire row the right width. Splash potions are not
+yet distinguished by contents or thrown (see `TODO.md`).
 
 The observation constants (`max_hp`, `arena_radius`, the combat-timing
 numbers the tracker needs, `input_order`, …) are fetched once from
@@ -245,7 +247,8 @@ not a tool for hiding one - it only ever makes the bot *more* vanilla.
      `self_eating`/`self_bow_draw`/`self_burning`/`self_shield_disabled`/
      `self_arrows`/`self_slot`/`self_swap_lockout`/`self_food` (0-20)/
      `self_sneaking`/`self_mining` (0-1 block-break progress, `uhc` pickaxe;
-     `azalea_bot` doesn't mine, so it reports 0) ...), an `inventory` list
+     `azalea_bot` doesn't mine, so it reports 0)/`self_effects` (9 floats,
+     `amplifier + 1` per status effect) ...), an `inventory` list
      (per-item counts, order = `spec.json`'s `inventory_items`), a `hotbar`
      list (the `kit::Item` id in each of the 9 physical slots - see
      `spec.json`'s `hotbar_layout`), then `enemies`, `teammates`,
@@ -303,8 +306,9 @@ POST /act
   "self_bow_draw": 0.0, "self_burning": 0.0, "self_shield_disabled": 0.0,
   "self_arrows": 6, "self_slot": 0, "self_swap_lockout": 0.0,
   "self_food": 20, "self_sneaking": 0,
+  "self_effects": [0, 0, 0, 0, 0, 0, 0, 0, 0],
   "time_left": 18.0, "enemies_alive": 1, "teammates_alive": 0,
-  "inventory": [1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0],
+  "inventory": [1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   "hotbar": [1, 2, 4, 5, 0, 0, 0, 0, 0],
   "enemies": [
     { "present": true, "hp": 12.0,
@@ -324,8 +328,8 @@ POST /act
   "sneak": false, "held_slot": 1 }
 ```
 
-`held_slot` in the response is `0..spec.json["hotbar_action_dim"]` (21 for
-the current kits): `0-8` selects that physical hotbar slot, `9-20` hotkeys
+`held_slot` in the response is `0..spec.json["hotbar_action_dim"]` (26 for
+the current kits): `0-8` selects that physical hotbar slot, `9-25` hotkeys
 `item_ids[held_slot - 9]` into the selected slot (`9` = empty hand).
 `spec.json`'s `hotbar_layout` is the kit's starting slot -> item.
 Under `--input-order legacy` (the default), a slot change / hotkey on the
