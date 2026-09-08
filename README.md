@@ -195,6 +195,19 @@ checkpoint stores the trunk shape, `obs_dim`, the sim constants it trained
 against, and the full `SimConfig` - resuming refuses to load if the
 architecture or observation space no longer matches.
 
+### Rating a checkpoint (`evaluate.py`)
+
+`win_vs_scripted` in the training log is the only strength signal that
+isn't circular, and it's coarse. `python training/python/evaluate.py`
+runs a round-robin: a *candidate* checkpoint (default `latest.pt`) against
+a ladder of past `policy_update_*.pt` snapshots plus the `ScriptedOpponent`,
+in the same sim / kit / reward config the candidate trained under (read
+from its checkpoint). Every pair plays `--matches-per-pair` matches split
+evenly across the two starting sides, run continuously across
+`--num-arenas` arenas, and a Bradley-Terry fit turns the pairwise results
+into one Elo-scaled number per player. It only reads checkpoints - no
+training state is touched.
+
 ### Two transports, on purpose
 
 | link | transport | why |
@@ -235,7 +248,8 @@ it runs the actual Rust sim and `train.py` twice on a tiny config (few
 arenas, short rollouts, a handful of updates) against a throwaway
 checkpoint dir, then asserts on the run's logs and the checkpoint/league
 files it leaves behind — a fresh run trains and checkpoints, a second run
-resumes from `latest.pt` at the right update. Needs the sim built once
+resumes from `latest.pt` at the right update, then `evaluate.py` rates the
+resulting checkpoints and prints an Elo table. Needs the sim built once
 (`cd training/sim && cargo build --release`).
 
 The `pytest` suite cross-checks the inference bridge's per-observation
