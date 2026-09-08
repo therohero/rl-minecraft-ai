@@ -26,6 +26,7 @@ This is a test harness, not a training entry point - `run.sh` is that.
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import re
 import shutil
@@ -44,6 +45,8 @@ RESUME_UPDATES = 10
 COMMON_ARGS = [
     "--num-arenas", "16",
     "--rollout-len", "8",
+    "--log-every", "2",
+    "--metrics-csv",
     "--checkpoint-every", "3",
     "--keep-checkpoints", "2",
     "--opponent-fraction", "0.3",
@@ -124,7 +127,7 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="rl-smoke-")
     ckpt = os.path.join(tmp, "checkpoints")
     try:
-        print(f"[1/2] fresh run: {FRESH_UPDATES} updates -> {ckpt}")
+        print(f"[1/3] fresh run: {FRESH_UPDATES} updates -> {ckpt}")
         log1 = _run_training(sim_binary, ckpt, FRESH_UPDATES, fresh=True)
         _require(os.path.isfile(os.path.join(ckpt, "latest.pt")), "fresh run left no latest.pt", log1)
         numbered = sorted(f for f in os.listdir(ckpt) if re.match(r"policy_update_\d+\.pt$", f))
@@ -140,7 +143,7 @@ def main() -> int:
                  f"fresh run stopped at update {_last_update_in_log(log1)}, expected {FRESH_UPDATES}", log1)
         print(f"      ok: latest.pt + {len(numbered)} numbered snapshot(s) + {len(persisted)} league snapshot(s)")
 
-        print(f"[2/2] resume run: continue to {RESUME_UPDATES} updates")
+        print(f"[2/3] resume run: continue to {RESUME_UPDATES} updates")
         log2 = _run_training(sim_binary, ckpt, RESUME_UPDATES, fresh=False)
         m = re.search(r"resumed from .*latest\.pt at update=(\d+)", log2)
         _require(m is not None, "resume run did not log 'resumed from ... at update=<n>'", log2)
@@ -151,6 +154,19 @@ def main() -> int:
         _require(_last_update_in_log(log2) == RESUME_UPDATES,
                  f"resume run stopped at update {_last_update_in_log(log2)}, expected {RESUME_UPDATES}", log2)
         print("      ok: resumed from latest.pt at the right update, reloaded the league, ran on")
+
+        csv_path = os.path.join(ckpt, "metrics.csv")
+        _require(os.path.isfile(csv_path), "no metrics.csv was written", log1 + log2)
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        updates = [int(r["update"]) for r in rows]
+        _require(updates == sorted(updates) and len(updates) >= 4,
+                 f"metrics.csv update column looks wrong: {updates}", log1 + log2)
+        _require(updates[-1] == RESUME_UPDATES,
+                 f"metrics.csv last row is update {updates[-1]}, expected {RESUME_UPDATES}", log1 + log2)
+        for col in ("policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac", "win_rate"):
+            _require(col in rows[0], f"metrics.csv is missing the '{col}' column", log1 + log2)
+        print(f"      ok: metrics.csv has {len(rows)} rows through update {updates[-1]} (appended on resume)")
 
         print("[3/3] eval run: rate the checkpoints against each other + scripted")
         log3 = _run_eval(sim_binary, ckpt)

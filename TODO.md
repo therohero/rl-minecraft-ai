@@ -6,8 +6,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Training
 
-- [ ] **Structured metrics.** Console logging only right now — add optional
-  TensorBoard / CSV output (returns, win rates, losses, entropy, KL).
 - [ ] **Recurrent or frame-stacked policy.** The trunk is a memoryless MLP,
   but the task is a POMDP (latency-delayed view of others, occlusion). Try an
   LSTM head or an N-frame observation stack; keep the MLP as the default.

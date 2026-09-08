@@ -269,6 +269,8 @@ def ppo_update(
     policy_loss_sum = torch.zeros((), device=obs.device)
     value_loss_sum = torch.zeros((), device=obs.device)
     entropy_sum = torch.zeros((), device=obs.device)
+    approx_kl_sum = torch.zeros((), device=obs.device)
+    clip_frac_sum = torch.zeros((), device=obs.device)
     num_updates = 0
 
     for _ in range(epochs):
@@ -279,7 +281,8 @@ def ppo_update(
             logprob, entropy, value = model.evaluate(
                 obs[idx], raw_cont[idx], binary_action[idx], slot_action[idx]
             )
-            ratio = (logprob - old_logprob[idx]).exp()
+            logratio = logprob - old_logprob[idx]
+            ratio = logratio.exp()
 
             surr1 = ratio * adv[idx]
             surr2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * adv[idx]
@@ -295,6 +298,12 @@ def ppo_update(
             nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
 
+            with torch.no_grad():
+                # Schulman's low-variance approx KL(old||new); clip fraction
+                # is the share of samples the PPO ratio clamp actually bit.
+                approx_kl_sum += ((ratio - 1.0) - logratio).mean()
+                clip_frac_sum += ((ratio - 1.0).abs() > clip_ratio).float().mean()
+
             policy_loss_sum += policy_loss.detach()
             value_loss_sum += value_loss.detach()
             entropy_sum += entropy_bonus.detach()
@@ -305,4 +314,6 @@ def ppo_update(
         "policy_loss": (policy_loss_sum / denom).item(),
         "value_loss": (value_loss_sum / denom).item(),
         "entropy": (entropy_sum / denom).item(),
+        "approx_kl": (approx_kl_sum / denom).item(),
+        "clip_frac": (clip_frac_sum / denom).item(),
     }
