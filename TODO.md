@@ -6,9 +6,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Training
 
-- [ ] **Evaluation harness.** `win_vs_scripted` is the only non-circular
-  signal. Add an eval mode that plays the current checkpoint against a ladder
-  of past checkpoints + the scripted bot and reports a TrueSkill/ELO number.
 - [ ] **Structured metrics.** Console logging only right now — add optional
   TensorBoard / CSV output (returns, win rates, losses, entropy, KL).
 - [ ] **Recurrent or frame-stacked policy.** The trunk is a memoryless MLP,

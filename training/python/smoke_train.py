@@ -9,7 +9,9 @@ then asserts on the run's own log output + the files it left behind:
   1. a fresh run trains N updates, writes `latest.pt` + numbered snapshots
      (honouring --keep-checkpoints), and freezes opponent-league snapshots;
   2. a second run *resumes* from `latest.pt` at the right update and runs
-     on to a higher update count.
+     on to a higher update count;
+  3. `evaluate.py` rates the resulting checkpoints against each other + the
+     scripted bot and prints an Elo table.
 
 Exit code 0 = the training loop is healthy. Non-zero prints what failed.
 
@@ -66,11 +68,29 @@ def _run_training(sim_binary: str, checkpoint_dir: str, total_updates: int, fres
     ]
     if fresh:
         cmd.append("--fresh")
+    return _run(cmd, "train.py")
+
+
+def _run_eval(sim_binary: str, checkpoint_dir: str) -> str:
+    cmd = [
+        sys.executable, os.path.join(HERE, "evaluate.py"),
+        "--sim-binary", sim_binary,
+        "--checkpoint-dir", checkpoint_dir,
+        "--num-arenas", "16",
+        "--matches-per-pair", "6",
+        "--match-time", "8",
+        "--max-ladder", "3",
+        "--seed", "0",
+    ]
+    return _run(cmd, "evaluate.py")
+
+
+def _run(cmd: list[str], what: str) -> str:
     print(f"  $ {' '.join(cmd)}")
     proc = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=300)
     out = proc.stdout + proc.stderr
     if proc.returncode != 0:
-        raise SmokeFailure(f"train.py exited {proc.returncode}:\n{_indent(out)}")
+        raise SmokeFailure(f"{what} exited {proc.returncode}:\n{_indent(out)}")
     return out
 
 
@@ -131,6 +151,16 @@ def main() -> int:
         _require(_last_update_in_log(log2) == RESUME_UPDATES,
                  f"resume run stopped at update {_last_update_in_log(log2)}, expected {RESUME_UPDATES}", log2)
         print("      ok: resumed from latest.pt at the right update, reloaded the league, ran on")
+
+        print("[3/3] eval run: rate the checkpoints against each other + scripted")
+        log3 = _run_eval(sim_binary, ckpt)
+        _require("evaluating" in log3 and "players" in log3, "evaluate.py did not start a tournament", log3)
+        _require(re.search(r"candidate:latest\.pt\b.*<- candidate", log3) is not None,
+                 "evaluate.py report is missing the candidate row", log3)
+        _require(re.search(r"score vs the field \(\d+ matches\)", log3) is not None,
+                 "evaluate.py did not print the candidate summary", log3)
+        _require("vs scripted" in log3, "evaluate.py did not play the scripted bot", log3)
+        print("      ok: Elo table printed with the candidate rated against the ladder")
 
         print("\nSMOKE OK - training loop is healthy")
         return 0
