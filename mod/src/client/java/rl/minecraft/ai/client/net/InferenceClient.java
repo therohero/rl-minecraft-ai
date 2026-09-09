@@ -35,6 +35,8 @@ public final class InferenceClient {
     private volatile long lastOkNanos = 0;
     /** null = no reply seen yet; "" = last reply was 200; otherwise the failure text. */
     private volatile String lastError = null;
+    /** EWMA of the {@code POST /act} round-trip, ms; -1 before the first success. */
+    private volatile double latencyMsEwma = -1.0;
 
     public InferenceClient(String actUrl, String specUrl) {
         this.actUrl = actUrl;
@@ -66,6 +68,7 @@ public final class InferenceClient {
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build();
+        long startNanos = System.nanoTime();
         http.sendAsync(req, HttpResponse.BodyHandlers.ofString())
             .whenComplete((resp, err) -> {
                 try {
@@ -81,7 +84,11 @@ public final class InferenceClient {
                     }
                     latest.set(Action.fromJson(GSON.fromJson(resp.body(), JsonObject.class)));
                     lastError = "";
-                    lastOkNanos = System.nanoTime();
+                    long now = System.nanoTime();
+                    lastOkNanos = now;
+                    double ms = (now - startNanos) / 1_000_000.0;
+                    double prev = latencyMsEwma;
+                    latencyMsEwma = prev < 0 ? ms : prev * 0.8 + ms * 0.2;
                 } finally {
                     inFlight.set(false);
                 }
@@ -97,6 +104,12 @@ public final class InferenceClient {
         return lastOkNanos != 0;
     }
 
+    /** Smoothed {@code POST /act} round-trip in ms, or -1 before the first
+     *  successful reply. Wall-clock latency of the async call, not model time. */
+    public double latencyMs() {
+        return latencyMsEwma;
+    }
+
     /** null before any reply, "" when the last /act call succeeded, else the failure. */
     public String lastError() {
         return lastError;
@@ -106,6 +119,8 @@ public final class InferenceClient {
         latest.set(null);
         inFlight.set(false);
         lastError = null;
+        lastOkNanos = 0;
+        latencyMsEwma = -1.0;
     }
 
     private static String trim(String s) {

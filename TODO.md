@@ -66,7 +66,5 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   writes `(obs, action)` per tick and the reward is reconstructed offline;
   logging the real win/loss/HP at episode end would tighten
   `train_from_episodes.py`.
-- [ ] **HUD overlay.** Small on-screen readout of mode / detected kit / target
-  / inference latency while `/fight` is active.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.

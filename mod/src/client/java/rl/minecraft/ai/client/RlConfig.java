@@ -24,6 +24,7 @@ import java.util.Properties;
  * min_sneak_hold_ticks   = 3                  # debounce: min ticks a sneak state is held before flipping
  * require_line_of_sight    = true              # don't attack through a wall even if in reach cone
  * hotkey_swap_min_gap_ticks = 10              # min ticks between buried-item inventory swaps
+ * hud_enabled              = true              # small on-screen mode/kit/target/latency readout while fighting
  * </pre>
  */
 public final class RlConfig {
@@ -39,6 +40,7 @@ public final class RlConfig {
     public final int minSneakHoldTicks;
     public final boolean requireLineOfSight;
     public final int hotkeySwapMinGapTicks;
+    public final boolean hudEnabled;
 
     private RlConfig(Properties p, Path gameDir) {
         this.inferenceUrl = get(p, "inference_url", "http://127.0.0.1:8800/act");
@@ -57,6 +59,7 @@ public final class RlConfig {
         this.minSneakHoldTicks = (int) getDouble(p, "min_sneak_hold_ticks", 3);
         this.requireLineOfSight = getBoolean(p, "require_line_of_sight", true);
         this.hotkeySwapMinGapTicks = (int) getDouble(p, "hotkey_swap_min_gap_ticks", 10);
+        this.hudEnabled = getBoolean(p, "hud_enabled", true);
     }
 
     public static RlConfig load() {
