@@ -124,7 +124,7 @@ public final class FightController {
 
         this.kit = Kit.detect(mc.player);
         this.inference = new InferenceClient(cfg.inferenceUrl, cfg.specUrl);
-        this.guard = new ClientGuard(cfg);
+        this.guard = new ClientGuard(cfg, resolveSensitivity(mc));
         this.deathWatch = new DeathWatch(cfg);
         this.spec = Spec.DEFAULT;
         this.matchTag = practice ? "practice" : "real";
@@ -519,6 +519,15 @@ public final class FightController {
         lastAttacker = null;
         targetLabel = null;
         resetEpisodeOutcome();
+    }
+
+    private double resolveSensitivity(MinecraftClient mc) {
+        if (cfg.mouseSensitivity >= 0.0) return cfg.mouseSensitivity;
+        try {
+            return mc.options.getMouseSensitivity().getValue();
+        } catch (Exception e) {
+            return 0.5;
+        }
     }
 
     private GameMode gameMode(MinecraftClient mc) {

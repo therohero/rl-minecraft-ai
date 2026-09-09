@@ -215,6 +215,13 @@ This keeps an honest RL policy from *looking* like a cheat on servers you
 are authorized to run (your own test servers, research, CTF events). It is
 not a tool for hiding one - it only ever makes the bot *more* vanilla.
 
+The [`mod/`](../mod/README.md) Fabric client has a Java counterpart,
+`ClientGuard`, that goes further on rotation - it drives a modelled mouse
+(reaction lag, acceleration cap, whole-mouse-count quantisation on the
+client's real sensitivity curve, applied via `changeLookDirection`) rather
+than snapping the absolute angle - since a client-side mod can, where the
+headless `azalea` client only exposes an absolute set-rotation.
+
 ## Steps to test the bot live (by hand)
 
 1. Train a while, then export a checkpoint:

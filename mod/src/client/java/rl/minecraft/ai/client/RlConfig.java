@@ -31,6 +31,12 @@ import java.util.Properties;
  * death_teleport_blocks    = 8                 # a 1-tick jump this far = a (plugin-blocked) death
  * death_hp_floor           = 4                 # HP at/below this then instantly restored = a death
  * disengage_ticks          = 100              # end the episode after the target is gone this many ticks
+ * mouse_sensitivity        = -1                # -1 = use your in-game setting; else 0..1 to match it
+ * max_yaw_accel_deg        = 18                # virtual-mouse accel cap (deg/tick^2) - no instant flicks
+ * max_pitch_accel_deg      = 14
+ * aim_latency_ticks        = 2                 # aim lags the policy's target by this many ticks (reaction)
+ * max_cps                  = 12                # click-rate ceiling on top of the real attack cooldown
+ * click_jitter_ms          = 25                # gaussian spread on the min click gap (no metronome)
  * </pre>
  */
 public final class RlConfig {
@@ -53,6 +59,12 @@ public final class RlConfig {
     public final double deathTeleportBlocks;
     public final double deathHpFloor;
     public final int disengageTicks;
+    public final double mouseSensitivity;
+    public final double maxYawAccelDeg;
+    public final double maxPitchAccelDeg;
+    public final int aimLatencyTicks;
+    public final double maxCps;
+    public final double clickJitterMs;
 
     private RlConfig(Properties p, Path gameDir) {
         this.inferenceUrl = get(p, "inference_url", "http://127.0.0.1:8800/act");
@@ -78,6 +90,12 @@ public final class RlConfig {
         this.deathTeleportBlocks = getDouble(p, "death_teleport_blocks", 8.0);
         this.deathHpFloor = getDouble(p, "death_hp_floor", 4.0);
         this.disengageTicks = (int) getDouble(p, "disengage_ticks", 100);
+        this.mouseSensitivity = getDouble(p, "mouse_sensitivity", -1.0);
+        this.maxYawAccelDeg = getDouble(p, "max_yaw_accel_deg", 18.0);
+        this.maxPitchAccelDeg = getDouble(p, "max_pitch_accel_deg", 14.0);
+        this.aimLatencyTicks = Math.max(0, (int) getDouble(p, "aim_latency_ticks", 2));
+        this.maxCps = getDouble(p, "max_cps", 12.0);
+        this.clickJitterMs = getDouble(p, "click_jitter_ms", 25.0);
     }
 
     public static RlConfig load() {

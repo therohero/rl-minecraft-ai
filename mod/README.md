@@ -141,11 +141,21 @@ mode / a dimension change all pause the loop and stop recording):
    `{t, outcome, reason, self_hp_end, enemy_hp_end, opponent, server, match}`
    record and rolls to `-e<N+1>`.
 
-`ActionApplier` is deliberately lighter than `azalea_bot`'s guard: a real
-vanilla client already enforces jump-on-ground, the real hunger cost of
-sprinting, and the real attack cooldown, so the mod only adds what a real
-client can still fake - `ClientGuard` rotation naturalism (smoothing /
-rate-clamp / sub-degree jitter / 0.15° grid snap) and hit legality (reach,
+`ActionApplier` is deliberately lighter than `azalea_bot`'s guard in the
+places a real vanilla client already covers (jump-on-ground, the hunger cost
+of sprinting, the attack cooldown). What it adds is a **virtual mouse** in
+`ClientGuard`: the policy's per-tick yaw/pitch delta is treated as a desired
+turn *rate*, delayed by `aim_latency_ticks` (reaction lag), low-pass
+smoothed, chased by a modelled mouse velocity under an acceleration cap
+(`max_yaw_accel_deg`) and a top-speed cap, given a sub-degree tremor, then
+converted to a whole number of **mouse counts** through this client's exact
+vanilla sensitivity curve (`(s*0.6+0.2)³·8`, then `·0.15`; `s` read from
+your in-game setting or `mouse_sensitivity`) with the leftover fraction
+carried over, and applied through `changeLookDirection` - the same path a
+real mouse takes. So every rotation the server sees is an integer multiple
+of the mouse-count quantum with bounded velocity/acceleration and per-tick
+noise. On top of the real attack cooldown, `tryAttack` adds a jittered
+minimum click gap and a `max_cps` ceiling. Hit legality is unchanged (reach,
 a 14° facing cone, block line-of-sight, aim-settle). A buried kit item is
 hotkeyed into the hotbar via the player's own always-open (`syncId 0`)
 screen handler - the same `SWAP` click a vanilla client sends when you drag
@@ -230,12 +240,14 @@ actually throw one yet (see `TODO.md`).
 This mod runs an actual vanilla client, so a lot of what `azalea_bot`'s
 `guard.rs` has to fake (physics, hunger cost, attack cooldown) is simply
 real here. [`ClientGuard`](src/client/java/rl/minecraft/ai/client/combat/ClientGuard.java)
-covers what a real client can still give away: rotation is low-pass
-smoothed, rate-clamped, given a small per-tick jitter and snapped to the
-vanilla 0.15° mouse-sensitivity grid; an attack additionally requires a
-clear line of sight to the target (not just reach + facing cone) and holds
-fire for one tick right after a big turn (no "spun and hit same tick");
-sneak can't be toggled faster than `min_sneak_hold_ticks`. A buried kit item
-*is* juggled into the hotbar now too - via a `SWAP` click on the player's
-own always-open inventory screen handler, rate-limited by
-`hotkey_swap_min_gap_ticks` - mirroring `azalea_bot`'s open/click/close.
+covers what a real client can still give away: rotation goes through a
+**virtual mouse** (reaction lag, low-pass, an acceleration + top-speed cap,
+tremor, then quantised to whole mouse counts on this client's real
+sensitivity curve and applied via `changeLookDirection`), clicks get a
+jittered minimum gap and a `max_cps` ceiling on top of the real cooldown, an
+attack requires a clear line of sight and holds fire for one tick right
+after a big turn, and sneak can't be toggled faster than
+`min_sneak_hold_ticks`. A buried kit item is juggled into the hotbar via a
+`SWAP` click on the player's own always-open inventory screen handler,
+rate-limited by `hotkey_swap_min_gap_ticks` - mirroring `azalea_bot`'s
+open/click/close.

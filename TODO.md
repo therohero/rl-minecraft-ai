@@ -62,12 +62,10 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Mod (`mod/`)
 
-- [ ] **Mod anticheat naturalism (virtual mouse).** `ClientGuard` snaps the
-  rotation to the 0.15° grid but still *sets* yaw/pitch directly. Model an
-  actual mouse instead: turn the desired look change into synthetic mouse
-  deltas through the vanilla sensitivity cubic, with human accel/decel,
-  overshoot-and-correct and a reaction delay, so the server only ever sees
-  mouse-driven motion. Port the click-cadence bits from
-  `azalea_bot/src/guard.rs`. (in progress on `mod-live-server-training`)
+- [ ] **Tune the mod virtual-mouse against a real anticheat.** `ClientGuard`'s
+  new mouse model has plausible-but-guessed defaults (`max_yaw_accel_deg`,
+  `aim_latency_ticks`, `max_cps`, tremor). Validate / retune them against
+  GrimAC (and ideally Vulcan) on a test server; consider a small
+  rotation-log dump to eyeball the delta distribution.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.
