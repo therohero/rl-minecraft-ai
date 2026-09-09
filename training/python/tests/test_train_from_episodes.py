@@ -65,6 +65,15 @@ def test_unknown_outcome_no_terminal_bonus(tmp_path):
     assert reward[-1] == pytest.approx(0.0)
 
 
+def test_find_sessions_skips_manifest(tmp_path):
+    (tmp_path / "sword").mkdir()
+    (tmp_path / "sword" / "session-a.jsonl").write_text('{"t":0}\n')
+    (tmp_path / "manifest.jsonl").write_text(
+        '{"session":"session-a.jsonl","kit":"sword","outcome":"win"}\n' * 5)
+    found = tfe._find_sessions(str(tmp_path))
+    assert [p.rsplit("/", 1)[-1] for p in found] == ["session-a.jsonl"]
+
+
 def test_legacy_session_without_outcome_uses_heuristic(tmp_path):
     # enemy present at t0, gone at the end, we're alive -> heuristic win.
     ticks = [_tick(i, 20.0, 20.0) for i in range(4)]

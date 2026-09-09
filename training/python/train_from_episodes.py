@@ -49,7 +49,10 @@ def _find_sessions(root: str) -> list[str]:
     if os.path.isfile(root):
         return [root]
     hits = sorted(glob.glob(os.path.join(root, "**", "session-*.jsonl"), recursive=True))
-    hits += sorted(p for p in glob.glob(os.path.join(root, "*.jsonl")) if p not in hits)
+    # also accept loose *.jsonl in the root, but never the manifest (it's a
+    # list of session summaries, not a tick stream).
+    hits += sorted(p for p in glob.glob(os.path.join(root, "*.jsonl"))
+                   if p not in hits and os.path.basename(p) != "manifest.jsonl")
     return hits
 
 
