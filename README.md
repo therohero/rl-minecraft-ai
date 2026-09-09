@@ -11,7 +11,7 @@ The repo is split into three top-level folders:
 |---|---|
 | [`training/`](training/) | the RL training pipeline. [`training/sim/`](training/sim/README.md) is the headless Rust PvP simulation backend; `training/python/` is the PPO self-play trainer, feature engineering, opponent league, and model export. Checkpoints land in `training/checkpoints/`. |
 | [`azalea-bot/`](azalea-bot/README.md) | the seam between a trained checkpoint and a live game: `inference_server.py` serves the exported policy over localhost HTTP, and `azalea_bot/` is a ready-made Rust Minecraft client (via the `azalea` crate) that drives the bot on a real server, with off-the-tick inference and a client-side legality guard. |
-| [`mod/`](mod/README.md) | a client-side **Fabric mod** (MC 1.21.11). `/fight` takes over and fights the nearest player with the trained policy (via `azalea-bot/inference_server.py`); `/fight train` also records the fight as a dataset, tagged with the kit auto-detected from your inventory (uhc / sword / axe, default sword). |
+| [`mod/`](mod/README.md) | a client-side **Fabric mod** (MC 1.21.11). `/fight` takes over with the trained policy (via `azalea-bot/inference_server.py`) - passive by default, `/fight target` to engage; `/fight train` also records the fight as a dataset (one file per fight), tagged with the kit auto-detected from your inventory (uhc / sword / axe, default sword). |
 
 ## Quickstart
 
@@ -130,8 +130,8 @@ definition.
 - **`mod/`** is a second consumer of that same HTTP seam - a Fabric client
   mod whose `/fight` command does what `azalea_bot` does but from inside a
   real vanilla client, and whose `/fight train` records `(observation,
-  action)` JSONL per tick - plus a trailing win/loss outcome record - for
-  the offline fine-tune loop.
+  action)` JSONL per tick - one file per fight, each with a trailing
+  win/loss outcome record - for the offline fine-tune loop.
 
 ### The observation, in four places
 

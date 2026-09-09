@@ -18,19 +18,19 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Streams one JSON line per tick during {@code /fight train} to
- * {@code <dataset dir>/<kit>/session-<timestamp>.jsonl}, and appends a
- * one-line summary to {@code <dataset dir>/manifest.jsonl} when the session
- * ends. Each tick line is {@code {t, kit, target, obs, action}} - obs is the
- * raw (un-normalised) observation dict, ready for the trainer to consume the
- * same way {@code training/python/features.py::observation_to_row} does.
+ * Records {@code /fight train} to disk, <b>one file per fight</b>. A single
+ * {@code /fight train} session rotates through
+ * {@code <dataset dir>/<kit>/session-<timestamp>-e<N>.jsonl}: each death or
+ * kill closes the current episode file and the next engagement opens the
+ * next. Every file is one JSON object per tick
+ * ({@code {t, kit, target, obs, action}}, obs raw / un-normalised) followed by
+ * a trailing outcome record with no {@code obs} key:
  *
- * <p>The very last line of the file is instead an outcome record
- * {@code {t, outcome, self_hp_end, enemy_hp_end, reason}} (no {@code obs} key,
- * so the trainer can tell it apart). {@code outcome} is {@code "win"} /
- * {@code "loss"} / {@code "unknown"}; it lets
- * {@code training/python/train_from_episodes.py} use the real match result for
- * the terminal reward instead of guessing from the observation stream.
+ * <pre>{t, outcome, reason, self_hp_end, enemy_hp_end, opponent, server, match}</pre>
+ *
+ * so {@code training/python/train_from_episodes.py} gets a clean per-fight
+ * return and win/loss instead of guessing from the observation stream. A
+ * matching line lands in {@code <dataset dir>/manifest.jsonl} per episode.
  */
 public final class EpisodeRecorder implements AutoCloseable {
     private static final Gson GSON = new Gson();
@@ -38,40 +38,63 @@ public final class EpisodeRecorder implements AutoCloseable {
         DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault());
 
     private final Path datasetDir;
-    private final Path sessionFile;
+    private final Path kitDir;
+    private final String sessionId;
     private final Kit kit;
-    private final Instant startedAt;
+    private final String server;
+    private final String match;
+
+    private int episodeIndex = 0;
+    private int episodeTicks = 0;
+    private int totalTicks = 0;
+    private String opponent = "";
+    private Instant episodeStartedAt;
     private BufferedWriter writer;
-    private int ticks = 0;
 
-    // match outcome, filled in by finish() just before close()
-    private String outcome = "unknown";
-    private String outcomeReason = "manual stop";
-    private double selfHpEnd = Double.NaN;
-    private double enemyHpEnd = Double.NaN;
-
-    private EpisodeRecorder(Path datasetDir, Path sessionFile, Kit kit) {
+    private EpisodeRecorder(Path datasetDir, Path kitDir, String sessionId, Kit kit,
+                            String server, String match) {
         this.datasetDir = datasetDir;
-        this.sessionFile = sessionFile;
+        this.kitDir = kitDir;
+        this.sessionId = sessionId;
         this.kit = kit;
-        this.startedAt = Instant.now();
+        this.server = server == null || server.isBlank() ? "unknown" : server;
+        this.match = match == null || match.isBlank() ? "real" : match;
     }
 
-    public static EpisodeRecorder start(Path datasetDir, Kit kit) throws IOException {
-        Path dir = datasetDir.resolve(kit.id);
-        Files.createDirectories(dir);
-        Path file = dir.resolve("session-" + STAMP.format(Instant.now()) + ".jsonl");
-        EpisodeRecorder rec = new EpisodeRecorder(datasetDir, file, kit);
-        rec.writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8,
+    public static EpisodeRecorder start(Path datasetDir, Kit kit, String server, String match)
+            throws IOException {
+        Path kitDir = datasetDir.resolve(kit.id);
+        Files.createDirectories(kitDir);
+        String sessionId = "session-" + STAMP.format(Instant.now());
+        RlMinecraftAiClient.LOGGER.info("recording training session {} (kit={}, server={}, match={})",
+            sessionId, kit.id, server, match);
+        return new EpisodeRecorder(datasetDir, kitDir, sessionId, kit, server, match);
+    }
+
+    private Path episodeFile() {
+        return kitDir.resolve(sessionId + "-e" + episodeIndex + ".jsonl");
+    }
+
+    private void openEpisode() throws IOException {
+        writer = Files.newBufferedWriter(episodeFile(), StandardCharsets.UTF_8,
             StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
-        RlMinecraftAiClient.LOGGER.info("recording training episode -> {}", file);
-        return rec;
+        episodeStartedAt = Instant.now();
+        episodeTicks = 0;
+        opponent = "";
+        RlMinecraftAiClient.LOGGER.info("  -> episode {} -> {}", episodeIndex, episodeFile());
     }
 
     public void record(JsonObject obs, Action action, String targetName) {
-        if (writer == null) return;
+        try {
+            if (writer == null) openEpisode();
+        } catch (IOException e) {
+            RlMinecraftAiClient.LOGGER.warn("could not open episode file", e);
+            return;
+        }
+        if (targetName != null && !targetName.isBlank() && opponent.isBlank()) opponent = targetName;
         JsonObject line = new JsonObject();
-        line.addProperty("t", ticks++);
+        line.addProperty("t", episodeTicks++);
+        totalTicks++;
         line.addProperty("kit", kit.id);
         line.addProperty("target", targetName == null ? "" : targetName);
         line.add("obs", obs);
@@ -84,64 +107,48 @@ public final class EpisodeRecorder implements AutoCloseable {
         }
     }
 
-    public int ticks() {
-        return ticks;
-    }
-
     /**
-     * Record how the match ended. Call once before {@link #close()};
-     * {@code close()} writes it as the file's trailing line and into the
-     * manifest. {@code outcome} is {@code "win"} / {@code "loss"} /
-     * {@code "unknown"}. Pass {@code NaN} for an HP that wasn't observed.
+     * Close the current episode file with its outcome and roll to the next.
+     * A no-op if no episode has any ticks yet (no empty files). {@code outcome}
+     * is {@code "win"} / {@code "loss"} / {@code "unknown"}; pass {@code NaN}
+     * for an HP that wasn't observed.
      */
-    public void finish(String outcome, String reason, double selfHpEnd, double enemyHpEnd) {
-        this.outcome = outcome;
-        this.outcomeReason = reason;
-        this.selfHpEnd = selfHpEnd;
-        this.enemyHpEnd = enemyHpEnd;
-    }
-
-    public String outcome() {
-        return outcome;
-    }
-
-    private static void addHp(JsonObject o, String key, double hp) {
-        if (Double.isNaN(hp)) o.add(key, null);
-        else o.addProperty(key, hp);
-    }
-
-    public Path file() {
-        return sessionFile;
-    }
-
-    @Override
-    public void close() {
+    public void endEpisode(String outcome, String reason, double selfHpEnd, double enemyHpEnd) {
         if (writer == null) return;
+        Path file = episodeFile();
         try {
             JsonObject end = new JsonObject();
-            end.addProperty("t", ticks);
+            end.addProperty("t", episodeTicks);
             end.addProperty("outcome", outcome);
-            end.addProperty("reason", outcomeReason);
+            end.addProperty("reason", reason);
             addHp(end, "self_hp_end", selfHpEnd);
             addHp(end, "enemy_hp_end", enemyHpEnd);
+            end.addProperty("opponent", opponent);
+            end.addProperty("server", server);
+            end.addProperty("match", match);
             writer.write(GSON.toJson(end));
             writer.write('\n');
             writer.flush();
             writer.close();
         } catch (IOException e) {
-            RlMinecraftAiClient.LOGGER.warn("failed to close training file", e);
+            RlMinecraftAiClient.LOGGER.warn("failed to close episode file", e);
         }
         writer = null;
         try {
             JsonObject entry = new JsonObject();
-            entry.addProperty("session", sessionFile.getFileName().toString());
+            entry.addProperty("session", sessionId);
+            entry.addProperty("episode", episodeIndex);
+            entry.addProperty("file", file.getFileName().toString());
             entry.addProperty("kit", kit.id);
-            entry.addProperty("ticks", ticks);
+            entry.addProperty("ticks", episodeTicks);
             entry.addProperty("outcome", outcome);
-            entry.addProperty("reason", outcomeReason);
+            entry.addProperty("reason", reason);
             addHp(entry, "self_hp_end", selfHpEnd);
             addHp(entry, "enemy_hp_end", enemyHpEnd);
-            entry.addProperty("started_at", startedAt.toString());
+            entry.addProperty("opponent", opponent);
+            entry.addProperty("server", server);
+            entry.addProperty("match", match);
+            entry.addProperty("started_at", String.valueOf(episodeStartedAt));
             entry.addProperty("ended_at", Instant.now().toString());
             Files.writeString(datasetDir.resolve("manifest.jsonl"),
                 GSON.toJson(entry) + "\n", StandardCharsets.UTF_8,
@@ -149,7 +156,42 @@ public final class EpisodeRecorder implements AutoCloseable {
         } catch (IOException e) {
             RlMinecraftAiClient.LOGGER.warn("failed to append to manifest.jsonl", e);
         }
-        RlMinecraftAiClient.LOGGER.info("training episode closed: {} ticks, outcome={} -> {}",
-            ticks, outcome, sessionFile);
+        RlMinecraftAiClient.LOGGER.info("episode {} closed: {} ticks, outcome={} ({})",
+            episodeIndex, episodeTicks, outcome, reason);
+        episodeIndex++;
+        episodeTicks = 0;
+        opponent = "";
+    }
+
+    /** Ticks in the episode currently being recorded. */
+    public int ticks() {
+        return episodeTicks;
+    }
+
+    public int totalTicks() {
+        return totalTicks;
+    }
+
+    public int episodeIndex() {
+        return episodeIndex;
+    }
+
+    /** The file the current (or next) episode writes to. */
+    public Path file() {
+        return episodeFile();
+    }
+
+    public Path sessionDir() {
+        return kitDir;
+    }
+
+    @Override
+    public void close() {
+        endEpisode("unknown", "session ended", Double.NaN, Double.NaN);
+    }
+
+    private static void addHp(JsonObject o, String key, double hp) {
+        if (Double.isNaN(hp)) o.add(key, null);
+        else o.addProperty(key, hp);
     }
 }

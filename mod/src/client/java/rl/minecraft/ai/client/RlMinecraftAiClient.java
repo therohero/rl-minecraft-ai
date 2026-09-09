@@ -8,6 +8,8 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 
+import com.mojang.brigadier.arguments.StringArgumentType;
+
 import net.minecraft.util.Identifier;
 
 import org.slf4j.Logger;
@@ -61,13 +63,18 @@ public class RlMinecraftAiClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, access) ->
             dispatcher.register(ClientCommandManager.literal("fight")
                 .executes(ctx -> {
-                    controller.start(false, ctx.getSource()::sendFeedback);
+                    controller.start(false, false, ctx.getSource()::sendFeedback);
                     return 1;
                 })
-                .then(ClientCommandManager.literal("train").executes(ctx -> {
-                    controller.start(true, ctx.getSource()::sendFeedback);
-                    return 1;
-                }))
+                .then(ClientCommandManager.literal("train")
+                    .executes(ctx -> {
+                        controller.start(true, false, ctx.getSource()::sendFeedback);
+                        return 1;
+                    })
+                    .then(ClientCommandManager.literal("practice").executes(ctx -> {
+                        controller.start(true, true, ctx.getSource()::sendFeedback);
+                        return 1;
+                    })))
                 .then(ClientCommandManager.literal("stop").executes(ctx -> {
                     controller.stop(ctx.getSource()::sendFeedback);
                     return 1;
@@ -75,6 +82,21 @@ public class RlMinecraftAiClient implements ClientModInitializer {
                 .then(ClientCommandManager.literal("status").executes(ctx -> {
                     controller.status(ctx.getSource()::sendFeedback);
                     return 1;
-                }))));
+                }))
+                .then(ClientCommandManager.literal("stopfightingtoggle").executes(ctx -> {
+                    controller.toggleFightThroughDeath(ctx.getSource()::sendFeedback);
+                    return 1;
+                }))
+                .then(ClientCommandManager.literal("target")
+                    .executes(ctx -> {
+                        controller.describeTarget(ctx.getSource()::sendFeedback);
+                        return 1;
+                    })
+                    .then(ClientCommandManager.argument("spec", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            controller.setTarget(StringArgumentType.getString(ctx, "spec"),
+                                ctx.getSource()::sendFeedback);
+                            return 1;
+                        })))));
     }
 }

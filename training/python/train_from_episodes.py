@@ -1,10 +1,11 @@
 """Offline fine-tune of the policy on episodes the Fabric mod recorded live.
 
 `/fight train` in `mod/` writes one JSONL file per fight to
-`<dataset dir>/<kit>/session-*.jsonl`, one line per game tick:
+`<dataset dir>/<kit>/session-*-e<N>.jsonl`, one line per game tick:
 `{t, kit, target, obs, action}` (raw observation dict + the action the policy
-took), then a trailing outcome record `{t, outcome, self_hp_end,
-enemy_hp_end, reason}` with the real win/loss. This script closes the loop:
+took), then a trailing outcome record `{t, outcome, reason, self_hp_end,
+enemy_hp_end, opponent, server, match}` with the real win/loss. This script
+closes the loop:
 
   1. rebuilds each tick's feature vector with `features.observation_to_row`
      (the exact decode the inference server uses),

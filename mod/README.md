@@ -14,10 +14,23 @@ attacks while active.
 
 | command | what it does |
 |---|---|
-| `/fight` | Take over and fight the **nearest player**, driven by the trained policy served at `inference_url` (`azalea-bot/inference_server.py`). |
-| `/fight train` | Same, but also **records every `(observation, action)` pair** to a JSONL dataset, tagged with the **kit** auto-detected from your current inventory. |
+| `/fight` | Take over, driven by the trained policy served at `inference_url` (`azalea-bot/inference_server.py`). **Passive by default** - it won't attack anyone until they hit you or you `/fight target` them. |
+| `/fight train` | Same, but also **records `(observation, action)` per tick** to a JSONL dataset (one file per fight), tagged with the **kit** auto-detected from your inventory. `/fight train practice` tags the data as practice rather than a real match. |
 | `/fight stop` | Hand control back to you (also happens automatically on disconnect). |
-| `/fight status` | Show mode / detected kit / current target / whether the inference server is reachable (with its round-trip latency). |
+| `/fight status` | Show mode / kit / target lock / pause state / episode number / inference server. |
+| `/fight stopfightingtoggle` | Toggle whether dying hands control back (default) or just rolls the recorder to the next episode and keeps going. |
+| `/fight target <spec>` | Set who the bot may fight. `<spec>` is one of: `passive` / `clear` (fight back only), `<player name>`, `look` (whoever's under your crosshair), `nearest` (pin the closest player now), `last` (whoever last hit you), `region` (run twice at opposite corners - engage anyone inside the box), `auto` (continuous nearest - **only** where you're allowed to). Named / pinned / crosshair locks never auto-reacquire when the target dies or leaves. |
+
+### Server safety
+
+`/fight` on a real server defaults to **passive**: it drives movement but
+attacks no one until a player damages you (then it locks that player) or you
+name a target. It also **auto-pauses** - stops sending inputs *and* recording
+- whenever a GUI is open or you're a spectator, resets on a dimension change,
+and cuts a fresh recorded episode on every death / kill so the offline
+trainer sees clean per-fight returns. Death detection covers the case where a
+server plugin cancels the vanilla death (HP restored + a teleport / dimension
+swap / forced spectator). Still: only use this where you are authorised to.
 
 ## HUD overlay
 
@@ -47,22 +60,25 @@ mirrors `training/sim/src/kit.rs` / `training/python/export_model.py`.
 ## What `/fight train` writes
 
 ```
-<dataset dir>/<kit>/session-<timestamp>.jsonl   # one JSON object per tick: {t, kit, target, obs, action}
-<dataset dir>/manifest.jsonl                     # one line per finished session
+<dataset dir>/<kit>/session-<timestamp>-e<N>.jsonl   # one fight: one JSON object per tick {t, kit, target, obs, action}
+<dataset dir>/manifest.jsonl                          # one line per finished episode
 ```
 
-`obs` is the **raw, un-normalised** observation dict - the same shape
+One `/fight train` session rotates through `-e0`, `-e1`, ... - a new file
+each death or kill - so every file is exactly one fight. `obs` is the
+**raw, un-normalised** observation dict, the same shape
 `training/python/features.py::observation_to_row` consumes. The dataset dir
 defaults to `<game dir>/rl-datasets` (override in config).
 
-The **last** line of each session file is instead an outcome record -
-`{t, outcome, self_hp_end, enemy_hp_end, reason}` with no `obs` key, so the
-trainer can tell it apart. `outcome` is `win` (the target went down while we
-were alive), `loss` (we died), or `unknown` (the fight was ended by hand or
-the target left range). `train_from_episodes.py` uses it for the terminal
-win/loss reward and the final-tick HP deltas instead of guessing from the
-observation stream; the same fields are copied into the `manifest.jsonl`
-line. Older datasets without the record still fall back to the guess.
+The **last** line of each file is an outcome record with no `obs` key:
+`{t, outcome, reason, self_hp_end, enemy_hp_end, opponent, server, match}`.
+`outcome` is `win` (target down while we were alive), `loss` (we died), or
+`unknown` (ended by hand / disengaged / dimension change).
+`train_from_episodes.py` uses it for the terminal win/loss reward and the
+final-tick HP deltas instead of guessing from the observation stream; the
+same fields (plus `episode`, `ticks`, timestamps) are copied into the
+`manifest.jsonl` line. Older datasets without the record still fall back to
+the guess.
 
 `/fight train` only **collects data** - it does not change the model while
 you play. The message it prints on start/stop points at the file and the
@@ -96,9 +112,17 @@ so it lines up with where `/fight train` writes.
 before vanilla polls input, so the keybinding state the mod sets is picked
 up the same tick.
 
-Each tick, while a fight is active:
+Each tick, while a fight is active (and not paused - a GUI open / spectator
+mode / a dimension change all pause the loop and stop recording):
 
-1. `TargetSelector.nearest` picks the nearest other player.
+1. `TargetLock.resolve` picks the target: `PASSIVE` (default) returns only
+   whoever last damaged us (`FightController` tracks that off `hurtTime` +
+   `getAttacker()`), the other kinds resolve a named / pinned / in-region /
+   nearest player. `DeathWatch` checks for a death - vanilla (HP 0 / respawn)
+   or plugin-cancelled (HP restored the same tick as a teleport / dimension
+   swap / forced spectator) - and a target that just went untargetable
+   because it died is a kill; either one closes the current recorded episode
+   and opens the next.
 2. The reconstructed self-timers advance from the state about to be
    observed: `bowDrawTicks` (ticks holding right-click with a bow),
    `ticksSinceSwap` (0 the tick the selected slot changed), which become
@@ -112,9 +136,10 @@ Each tick, while a fight is active:
 4. `InferenceClient.requestAsync` POSTs it off-thread; the freshest
    `Action` already returned is applied by `ActionApplier.apply`.
 5. In `train` mode, `EpisodeRecorder` streams `{t, kit, target, obs,
-   action}` as one JSONL line per tick, and on stop appends the
-   `{t, outcome, self_hp_end, enemy_hp_end, reason}` record -
-   `FightController` classifies the outcome from live target / self state.
+   action}` to the current `session-*-e<N>.jsonl`; each death / kill /
+   disengage / dimension change closes that file with a
+   `{t, outcome, reason, self_hp_end, enemy_hp_end, opponent, server, match}`
+   record and rolls to `-e<N+1>`.
 
 `ActionApplier` is deliberately lighter than `azalea_bot`'s guard: a real
 vanilla client already enforces jump-on-ground, the real hunger cost of
@@ -130,7 +155,8 @@ an item onto a number key - rate-limited by `hotkey_swap_min_gap_ticks`.
 `GET /spec` on a daemon thread at fight start and falls back to
 `Spec.DEFAULT` (the sim defaults) until it arrives. A respawn hands the
 client a fresh player entity, so the guard's low-pass and the
-reconstructed timers are reset when the entity instance changes.
+reconstructed timers are reset when the entity instance changes (and that
+same instance swap is itself read as a death).
 
 ## Configuration
 
@@ -149,6 +175,12 @@ min_sneak_hold_ticks      = 3      # debounce: min ticks a sneak state is held b
 require_line_of_sight     = true   # don't attack through a wall even if in reach + facing cone
 hotkey_swap_min_gap_ticks = 10     # min ticks between buried-item inventory swaps
 hud_enabled               = true   # small on-screen mode/kit/target/latency readout while fighting
+fight_through_death       = false  # keep fighting after death (also /fight stopfightingtoggle)
+pause_on_screen           = true   # stop driving inputs + recording while a GUI is open
+engage_range              = 0      # /fight target auto max distance (blocks); 0 = unlimited
+death_teleport_blocks     = 8      # a 1-tick position jump this far reads as a death
+death_hp_floor            = 4      # HP at/below this then instantly restored reads as a death
+disengage_ticks           = 100    # end the episode after the target has been gone this many ticks
 ```
 
 ## Build & run
