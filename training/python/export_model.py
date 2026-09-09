@@ -147,14 +147,25 @@ def main():
         "self_arrows (/16)", "self_slot (/ (HOTBAR_SLOTS-1))", "self_swap_lockout (0..1)",
         "self_food (/20)", "self_sneaking (0/1)", "self_mining (0..1)",
     ]
+    # The `self_effects` block (WIRE_VERSION 9), one float per effects.rs::Effect
+    # in enum order: `(amplifier + 1) / 4` while active, else 0.
+    effect_fields = [
+        f"self_effect.{e} (amp+1 /4)" for e in (
+            "speed", "slowness", "strength", "weakness", "regeneration",
+            "poison", "instant_health", "instant_damage", "fire_resistance",
+        )
+    ]
     other_fields = [
         "present (0/1)", "hp+absorption (/max_hp)", "rel_x", "rel_y", "rel_z",
         "vel_x", "vel_y", "vel_z", "ground_height (/terrain_max_amplitude)",
         "blocking (0..1)", "eating (0/1)", "held_ranged (0/1)", "sneaking (0/1)",
     ]
+    # The `inventory` block: per-item counts for item ids 1..ITEM_COUNT-1
+    # (id 0 = empty is not stored), mirroring sim/src/kit.rs::Item order.
     inv_items = [
         "sword", "axe", "pickaxe", "bow", "crossbow", "planks", "cobweb",
         "water_bucket", "lava_bucket", "golden_apple", "golden_head",
+        "splash_healing", "splash_harming", "splash_poison", "splash_speed", "splash_strength",
     ]
     proj_fields = ["present (0/1)", "rel_x", "rel_y", "rel_z", "vel_x", "vel_y", "vel_z"]
     col_fields = ["top_rel (/terrain_max_amplitude)", "water (0/1)", "lava (0/1)", "cobweb (0/1)"]
@@ -172,6 +183,7 @@ def main():
     hotbar_layout = hotbar_layouts.get(sim_config.get("kit") or "sword", hotbar_layouts["sword"])
 
     obs_field_order = list(self_fields)
+    obs_field_order += effect_fields
     obs_field_order += [f"inventory.{it} (count/16)" for it in inv_items]
     obs_field_order += [f"hotbar.slot{k} (item_id/(ITEM_COUNT-1))" for k in range(features.HOTBAR_SLOTS)]
     for k in range(c.max_observed_enemies):
@@ -184,6 +196,17 @@ def main():
     for k in range(ncols):
         obs_field_order += [f"block_col{k}.{f}" for f in col_fields]
     obs_field_order += ["time_left (/match_time_seconds)", "enemies_alive", "teammates_alive"]
+
+    # The field list is hand-maintained here (it carries human-readable names /
+    # normalization notes for non-Python consumers); assert it hasn't drifted
+    # from the actual policy input width - a mismatch means a wire-layout change
+    # landed without updating self_fields / effect_fields / inv_items above.
+    if frame_stack == 1 and len(obs_field_order) != obs_dim:
+        raise SystemExit(
+            f"spec obs_field_order has {len(obs_field_order)} entries but the policy takes "
+            f"obs_dim={obs_dim} - update the field lists in export_model.py to match "
+            "features.py's observation layout"
+        )
 
     spec = {
         "obs_dim": obs_dim,
@@ -220,6 +243,7 @@ def main():
         "item_ids": [
             "empty", "sword", "axe", "pickaxe", "bow", "crossbow",
             "planks", "cobweb", "water_bucket", "lava_bucket", "golden_apple", "golden_head",
+            "splash_healing", "splash_harming", "splash_poison", "splash_speed", "splash_strength",
         ],
         "yaw_pitch_delta_scale_radians": features.active_constants().max_look_delta,
         # The sim constants this policy trained against - inference_server.py
