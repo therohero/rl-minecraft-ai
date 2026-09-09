@@ -6,11 +6,15 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+
+import net.minecraft.util.Identifier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import rl.minecraft.ai.client.combat.FightController;
+import rl.minecraft.ai.client.hud.FightHud;
 
 /**
  * Client entrypoint. Wires up the {@code /fight} command family and the
@@ -43,6 +47,12 @@ public class RlMinecraftAiClient implements ClientModInitializer {
         // Drive input at the very start of the tick so the keybinding state we
         // set is picked up by vanilla's input polling this same tick.
         ClientTickEvents.START_CLIENT_TICK.register(controller::onClientTick);
+
+        // Small on-screen mode / kit / target / latency readout while fighting.
+        if (config.hudEnabled) {
+            HudElementRegistry.addLast(
+                Identifier.of(MOD_ID, "fight_hud"), new FightHud(controller)::render);
+        }
 
         // Never keep mind-controlling a player across a disconnect.
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) ->

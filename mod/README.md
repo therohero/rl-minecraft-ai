@@ -17,7 +17,19 @@ attacks while active.
 | `/fight` | Take over and fight the **nearest player**, driven by the trained policy served at `inference_url` (`azalea-bot/inference_server.py`). |
 | `/fight train` | Same, but also **records every `(observation, action)` pair** to a JSONL dataset, tagged with the **kit** auto-detected from your current inventory. |
 | `/fight stop` | Hand control back to you (also happens automatically on disconnect). |
-| `/fight status` | Show mode / detected kit / current target / whether the inference server is reachable. |
+| `/fight status` | Show mode / detected kit / current target / whether the inference server is reachable (with its round-trip latency). |
+
+## HUD overlay
+
+While a fight is active a small panel is drawn top-left: mode (`RL FIGHT` /
+`RL TRAIN`), the detected kit, the current target (`name <dist>m`), the
+inference-server round-trip (`<n>ms`, colour-coded green/yellow/red; or
+`connecting…` / `unreachable`), and - in `train` mode - the recorded tick
+count. It reads live `FightController` state and drives nothing. Hidden when
+idle, when the vanilla HUD is off (F1), or while the F3 debug screen is up.
+Turn it off with `hud_enabled = false`.
+`InferenceClient` tracks the `POST /act` wall-clock round-trip as an EWMA
+(`latencyMs()`), which both the HUD and `/fight status` read.
 
 ## Kit detection
 
@@ -125,6 +137,7 @@ aim_settle_deg            = 50     # hold the attack one tick after a turn bigge
 min_sneak_hold_ticks      = 3      # debounce: min ticks a sneak state is held before flipping
 require_line_of_sight     = true   # don't attack through a wall even if in reach + facing cone
 hotkey_swap_min_gap_ticks = 10     # min ticks between buried-item inventory swaps
+hud_enabled               = true   # small on-screen mode/kit/target/latency readout while fighting
 ```
 
 ## Build & run

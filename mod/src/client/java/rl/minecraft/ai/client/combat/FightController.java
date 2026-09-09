@@ -47,12 +47,37 @@ public final class FightController {
     private long tick = 0;
     private ClientPlayerEntity lastSelfSeen;
 
+    // Live snapshot for the HUD overlay (see hud/FightHud). Written from the
+    // client thread each tick, read from the render thread.
+    private volatile String targetLabel = null;
+
     public FightController(RlConfig cfg) {
         this.cfg = cfg;
     }
 
     public Mode mode() {
         return mode;
+    }
+
+    /** Detected kit id ({@code sword} / {@code axe} / {@code uhc}). */
+    public String kitId() {
+        return kit.id;
+    }
+
+    /** {@code "<name> <dist>m"} of the current target, or {@code null}. */
+    public String targetLabel() {
+        return targetLabel;
+    }
+
+    /** The inference client for this fight, or {@code null} while idle. */
+    public InferenceClient inference() {
+        return inference;
+    }
+
+    /** Ticks recorded so far in {@code train} mode, or -1 when not recording. */
+    public int recordedTicks() {
+        EpisodeRecorder r = recorder;
+        return r == null ? -1 : r.ticks();
     }
 
     /** Start (or restart) fighting. {@code train} also records a dataset. */
@@ -117,7 +142,8 @@ public final class FightController {
         if (inference == null) {
             server = "§7-";
         } else if (inference.seenServer()) {
-            server = "§aok";
+            double ms = inference.latencyMs();
+            server = ms < 0 ? "§aok" : String.format("§aok §7(%.0fms)", ms);
         } else {
             String err = inference.lastError();
             server = (err == null || err.isEmpty()) ? "§eno reply yet" : "§c" + err;
@@ -148,6 +174,8 @@ public final class FightController {
         }
 
         PlayerEntity target = TargetSelector.nearest(world, self);
+        targetLabel = target == null ? null
+            : target.getName().getString() + String.format(" %.1fm", self.distanceTo(target));
 
         // advance reconstructed timers from the state we're about to observe
         int selected = self.getInventory().getSelectedSlot();
@@ -201,6 +229,7 @@ public final class FightController {
         ticksSinceSwap = 99;
         lastSelectedSlot = -1;
         lastSelfSeen = null;
+        targetLabel = null;
     }
 
     private void fetchSpecAsync() {
