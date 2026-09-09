@@ -51,7 +51,7 @@ class InferencePolicy(nn.Module):
         self.actor_critic = actor_critic
 
     def forward(self, obs: torch.Tensor):
-        mean, log_std, binary_logits, slot_logits, _value = self.actor_critic.forward(obs)
+        mean, log_std, binary_logits, slot_logits, _value, _hidden = self.actor_critic.forward(obs)
         cont_std = log_std.exp()
         binary_probs = torch.sigmoid(binary_logits)
         slot_probs = torch.softmax(slot_logits, dim=-1)
@@ -82,6 +82,15 @@ def main():
             "--frame-stack 1, or implement live frame stacking first (see TODO.md)."
         )
 
+    lstm_hidden = (ckpt.get("arch") or {}).get("lstm_hidden", 0)
+    if lstm_hidden:
+        raise SystemExit(
+            f"this checkpoint was trained with --lstm (recurrent head, lstm_hidden={lstm_hidden}). "
+            "The live inference bridges (azalea-bot, mod) keep no recurrent state between ticks, so "
+            "an LSTM checkpoint can't be exported for live play. Train the deployable policy without "
+            "--lstm, or implement live recurrent inference first (see TODO.md)."
+        )
+
     # Restore the exact sim-side normalization constants and trunk shape this
     # checkpoint was trained with, so the exported policy + spec.json match.
     sim_constants = ckpt.get("sim_constants", {})
@@ -101,6 +110,7 @@ def main():
         hidden_size=arch.get("hidden_size", 256),
         num_layers=arch.get("num_layers", 2),
         slot_dim=arch.get("slot_dim", features.HOTBAR_ACTION_DIM),
+        lstm_hidden=arch.get("lstm_hidden", 0),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -231,6 +241,7 @@ def main():
             "hidden_size": model.hidden_size,
             "num_layers": model.num_layers,
             "slot_dim": model.slot_dim,
+            "lstm_hidden": model.lstm_hidden,
         },
         "constants": {
             "max_hp": features.active_constants().max_hp,

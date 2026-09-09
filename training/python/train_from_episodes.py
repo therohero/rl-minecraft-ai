@@ -171,7 +171,14 @@ def main():
         hidden_size=arch.get("hidden_size", 256),
         num_layers=arch.get("num_layers", 2),
         slot_dim=arch.get("slot_dim", features.HOTBAR_ACTION_DIM),
+        lstm_hidden=arch.get("lstm_hidden", 0),
     )
+    if model.recurrent:
+        raise SystemExit(
+            "this checkpoint was trained with --lstm; offline replay training here is stateless "
+            "(it treats every logged tick independently) and can't fit a recurrent head. Use an "
+            "MLP / frame-stacked checkpoint."
+        )
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -189,7 +196,7 @@ def main():
                         os.path.basename(path), obs.shape[1], obs_dim)
             continue
         with torch.no_grad():
-            _, _, _, _, value = model.forward(torch.from_numpy(obs))
+            _, _, _, _, value, _ = model.forward(torch.from_numpy(obs))
         adv, ret = _gae(reward, value.numpy(), done, ARGS.gamma, ARGS.gae_lambda)
         obs_all.append(obs); rc_all.append(rc); bin_all.append(bn); slot_all.append(sl)
         adv_all.append(adv); ret_all.append(ret)
@@ -224,7 +231,7 @@ def main():
         pi_loss_sum = v_loss_sum = 0.0
         for start in range(0, N, ARGS.batch_size):
             idx = perm[start:start + ARGS.batch_size]
-            logprob, _entropy, value = model.evaluate(obs[idx], raw_cont[idx], binary[idx], slot[idx])
+            logprob, _entropy, value, _ = model.evaluate(obs[idx], raw_cont[idx], binary[idx], slot[idx])
             pi_loss = -(weight[idx] * logprob).mean()
             v_loss = torch.nn.functional.mse_loss(value, ret[idx])
             loss = pi_loss + ARGS.value_coef * v_loss
