@@ -55,6 +55,15 @@ mirrors `training/sim/src/kit.rs` / `training/python/export_model.py`.
 `training/python/features.py::observation_to_row` consumes. The dataset dir
 defaults to `<game dir>/rl-datasets` (override in config).
 
+The **last** line of each session file is instead an outcome record -
+`{t, outcome, self_hp_end, enemy_hp_end, reason}` with no `obs` key, so the
+trainer can tell it apart. `outcome` is `win` (the target went down while we
+were alive), `loss` (we died), or `unknown` (the fight was ended by hand or
+the target left range). `train_from_episodes.py` uses it for the terminal
+win/loss reward and the final-tick HP deltas instead of guessing from the
+observation stream; the same fields are copied into the `manifest.jsonl`
+line. Older datasets without the record still fall back to the guess.
+
 `/fight train` only **collects data** - it does not change the model while
 you play. The message it prints on start/stop points at the file and the
 command below.
@@ -103,7 +112,9 @@ Each tick, while a fight is active:
 4. `InferenceClient.requestAsync` POSTs it off-thread; the freshest
    `Action` already returned is applied by `ActionApplier.apply`.
 5. In `train` mode, `EpisodeRecorder` streams `{t, kit, target, obs,
-   action}` as one JSONL line per tick.
+   action}` as one JSONL line per tick, and on stop appends the
+   `{t, outcome, self_hp_end, enemy_hp_end, reason}` record -
+   `FightController` classifies the outcome from live target / self state.
 
 `ActionApplier` is deliberately lighter than `azalea_bot`'s guard: a real
 vanilla client already enforces jump-on-ground, the real hunger cost of

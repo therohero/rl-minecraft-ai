@@ -3,13 +3,15 @@
 `/fight train` in `mod/` writes one JSONL file per fight to
 `<dataset dir>/<kit>/session-*.jsonl`, one line per game tick:
 `{t, kit, target, obs, action}` (raw observation dict + the action the policy
-took). This script closes the loop:
+took), then a trailing outcome record `{t, outcome, self_hp_end,
+enemy_hp_end, reason}` with the real win/loss. This script closes the loop:
 
   1. rebuilds each tick's feature vector with `features.observation_to_row`
      (the exact decode the inference server uses),
   2. reconstructs a per-tick reward from the observation stream, mirroring
      `training/sim/src/arena.rs::reward` - damage dealt minus damage taken,
-     plus a terminal win/loss bonus,
+     plus a terminal win/loss bonus from the logged outcome record (or, for
+     older datasets without one, guessed from the observation stream),
   3. computes GAE advantages using the current checkpoint's value head,
   4. runs a few epochs of advantage-weighted regression (AWR): weighted
      behavioural cloning toward the actions that did well, on real-server
@@ -64,6 +66,12 @@ def _load_session(path: str, scale: float):
             line = line.strip()
             if line:
                 rows.append(json.loads(line))
+    # The mod writes a trailing outcome record `{t, outcome, self_hp_end,
+    # enemy_hp_end, reason}` (no `obs` key). Older datasets don't have it -
+    # fall back to guessing the result from the observation stream.
+    outcome_rec = None
+    if rows and "obs" not in rows[-1]:
+        outcome_rec = rows.pop()
     if len(rows) < 4:
         return None
 
@@ -105,11 +113,28 @@ def _load_session(path: str, scale: float):
 
     done = np.zeros(T, dtype=np.float32)
     done[-1] = 1.0
-    # terminal bonus: enemy gone while we're alive = win; we're dead = loss.
-    if self_hp[-1] <= 0.5:
-        reward[-1] -= ARGS.loss
-    elif enemy_present[0] and not enemy_present[-1]:
-        reward[-1] += ARGS.win
+    if outcome_rec is not None:
+        # Real match result logged by the mod. Also fold in the final-tick HP
+        # deltas (the per-tick loop above stops at T-1, so the last hit /
+        # last hit taken would otherwise be dropped).
+        she = outcome_rec.get("self_hp_end")
+        if she is not None:
+            reward[-1] -= max(0.0, self_hp[-1] - float(she)) * ARGS.per_hp_taken
+        ehe = outcome_rec.get("enemy_hp_end")
+        if ehe is not None and enemy_present[-1]:
+            reward[-1] += max(0.0, enemy_hp[-1] - float(ehe)) * ARGS.per_hp_dealt
+        oc = str(outcome_rec.get("outcome", "unknown"))
+        if oc == "loss":
+            reward[-1] -= ARGS.loss
+        elif oc == "win":
+            reward[-1] += ARGS.win
+        # "unknown" (manual /fight stop, enemy ran off): no terminal bonus
+    else:
+        # legacy heuristic: enemy gone while we're alive = win; we're dead = loss.
+        if self_hp[-1] <= 0.5:
+            reward[-1] -= ARGS.loss
+        elif enemy_present[0] and not enemy_present[-1]:
+            reward[-1] += ARGS.win
 
     return (
         np.asarray(obs_vecs, dtype=np.float32),

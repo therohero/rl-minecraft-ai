@@ -130,7 +130,8 @@ definition.
 - **`mod/`** is a second consumer of that same HTTP seam - a Fabric client
   mod whose `/fight` command does what `azalea_bot` does but from inside a
   real vanilla client, and whose `/fight train` records `(observation,
-  action)` JSONL for the offline fine-tune loop.
+  action)` JSONL per tick - plus a trailing win/loss outcome record - for
+  the offline fine-tune loop.
 
 ### The observation, in four places
 

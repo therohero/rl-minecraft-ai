@@ -21,9 +21,16 @@ import java.time.format.DateTimeFormatter;
  * Streams one JSON line per tick during {@code /fight train} to
  * {@code <dataset dir>/<kit>/session-<timestamp>.jsonl}, and appends a
  * one-line summary to {@code <dataset dir>/manifest.jsonl} when the session
- * ends. Each line is {@code {t, kit, target, obs, action}} - obs is the raw
- * (un-normalised) observation dict, ready for the trainer to consume the same
- * way {@code training/python/features.py::observation_to_row} does.
+ * ends. Each tick line is {@code {t, kit, target, obs, action}} - obs is the
+ * raw (un-normalised) observation dict, ready for the trainer to consume the
+ * same way {@code training/python/features.py::observation_to_row} does.
+ *
+ * <p>The very last line of the file is instead an outcome record
+ * {@code {t, outcome, self_hp_end, enemy_hp_end, reason}} (no {@code obs} key,
+ * so the trainer can tell it apart). {@code outcome} is {@code "win"} /
+ * {@code "loss"} / {@code "unknown"}; it lets
+ * {@code training/python/train_from_episodes.py} use the real match result for
+ * the terminal reward instead of guessing from the observation stream.
  */
 public final class EpisodeRecorder implements AutoCloseable {
     private static final Gson GSON = new Gson();
@@ -36,6 +43,12 @@ public final class EpisodeRecorder implements AutoCloseable {
     private final Instant startedAt;
     private BufferedWriter writer;
     private int ticks = 0;
+
+    // match outcome, filled in by finish() just before close()
+    private String outcome = "unknown";
+    private String outcomeReason = "manual stop";
+    private double selfHpEnd = Double.NaN;
+    private double enemyHpEnd = Double.NaN;
 
     private EpisodeRecorder(Path datasetDir, Path sessionFile, Kit kit) {
         this.datasetDir = datasetDir;
@@ -75,6 +88,28 @@ public final class EpisodeRecorder implements AutoCloseable {
         return ticks;
     }
 
+    /**
+     * Record how the match ended. Call once before {@link #close()};
+     * {@code close()} writes it as the file's trailing line and into the
+     * manifest. {@code outcome} is {@code "win"} / {@code "loss"} /
+     * {@code "unknown"}. Pass {@code NaN} for an HP that wasn't observed.
+     */
+    public void finish(String outcome, String reason, double selfHpEnd, double enemyHpEnd) {
+        this.outcome = outcome;
+        this.outcomeReason = reason;
+        this.selfHpEnd = selfHpEnd;
+        this.enemyHpEnd = enemyHpEnd;
+    }
+
+    public String outcome() {
+        return outcome;
+    }
+
+    private static void addHp(JsonObject o, String key, double hp) {
+        if (Double.isNaN(hp)) o.add(key, null);
+        else o.addProperty(key, hp);
+    }
+
     public Path file() {
         return sessionFile;
     }
@@ -83,6 +118,14 @@ public final class EpisodeRecorder implements AutoCloseable {
     public void close() {
         if (writer == null) return;
         try {
+            JsonObject end = new JsonObject();
+            end.addProperty("t", ticks);
+            end.addProperty("outcome", outcome);
+            end.addProperty("reason", outcomeReason);
+            addHp(end, "self_hp_end", selfHpEnd);
+            addHp(end, "enemy_hp_end", enemyHpEnd);
+            writer.write(GSON.toJson(end));
+            writer.write('\n');
             writer.flush();
             writer.close();
         } catch (IOException e) {
@@ -94,6 +137,10 @@ public final class EpisodeRecorder implements AutoCloseable {
             entry.addProperty("session", sessionFile.getFileName().toString());
             entry.addProperty("kit", kit.id);
             entry.addProperty("ticks", ticks);
+            entry.addProperty("outcome", outcome);
+            entry.addProperty("reason", outcomeReason);
+            addHp(entry, "self_hp_end", selfHpEnd);
+            addHp(entry, "enemy_hp_end", enemyHpEnd);
             entry.addProperty("started_at", startedAt.toString());
             entry.addProperty("ended_at", Instant.now().toString());
             Files.writeString(datasetDir.resolve("manifest.jsonl"),
@@ -102,6 +149,7 @@ public final class EpisodeRecorder implements AutoCloseable {
         } catch (IOException e) {
             RlMinecraftAiClient.LOGGER.warn("failed to append to manifest.jsonl", e);
         }
-        RlMinecraftAiClient.LOGGER.info("training episode closed: {} ticks -> {}", ticks, sessionFile);
+        RlMinecraftAiClient.LOGGER.info("training episode closed: {} ticks, outcome={} -> {}",
+            ticks, outcome, sessionFile);
     }
 }

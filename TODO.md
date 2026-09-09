@@ -62,9 +62,5 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Mod (`mod/`)
 
-- [ ] **Record match outcome in the JSONL.** `/fight train` currently only
-  writes `(obs, action)` per tick and the reward is reconstructed offline;
-  logging the real win/loss/HP at episode end would tighten
-  `train_from_episodes.py`.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.

@@ -47,6 +47,14 @@ public final class FightController {
     private long tick = 0;
     private ClientPlayerEntity lastSelfSeen;
 
+    // match-outcome tracking for the recorded episode (see EpisodeRecorder)
+    private boolean sawEnemy = false;
+    private double lastSelfHp = Double.NaN;
+    private double lastEnemyHp = Double.NaN;
+    private PlayerEntity lastTarget = null;
+    private String outcome = "unknown";
+    private String outcomeReason = "manual stop";
+
     // Live snapshot for the HUD overlay (see hud/FightHud). Written from the
     // client thread each tick, read from the render thread.
     private volatile String targetLabel = null;
@@ -121,10 +129,12 @@ public final class FightController {
         boolean wasActive = mode != Mode.IDLE;
         boolean wasTraining = mode == Mode.TRAINING && recorder != null;
         int recordedTicks = wasTraining ? recorder.ticks() : 0;
+        String finalOutcome = outcome;
         stopInternal(mc);
         if (wasTraining) {
             feedback.accept(Text.literal("§estopped - recorded §f" + recordedTicks
-                + "§e ticks. Offline-train on it with §f./run_train_mod.sh"));
+                + "§e ticks (outcome: §f" + finalOutcome
+                + "§e). Offline-train on it with §f./run_train_mod.sh"));
         } else {
             feedback.accept(Text.literal(wasActive ? "§estopped" : "§7not fighting"));
         }
@@ -159,6 +169,11 @@ public final class FightController {
         ClientPlayerEntity self = mc.player;
         ClientWorld world = mc.world;
         if (self == null || world == null || !self.isAlive()) {
+            if (self != null && !self.isAlive() && sawEnemy && "unknown".equals(outcome)) {
+                outcome = "loss";
+                outcomeReason = "self died";
+                lastSelfHp = 0.0;
+            }
             lastSelfSeen = null; // dead or gone - next live tick is a fresh respawn either way
             return;
         }
@@ -176,6 +191,26 @@ public final class FightController {
         PlayerEntity target = TargetSelector.nearest(world, self);
         targetLabel = target == null ? null
             : target.getName().getString() + String.format(" %.1fm", self.distanceTo(target));
+
+        // outcome tracking: a target that was there and is now un-targetable
+        // because it died (or vanished at ~0 hp) is a win; anything else that
+        // ends the fight with us alive stays "unknown" (manual stop, ran off).
+        lastSelfHp = self.getHealth();
+        if (target != null) {
+            sawEnemy = true;
+            lastTarget = target;
+            lastEnemyHp = target.getHealth();
+        } else if (sawEnemy && "unknown".equals(outcome) && lastTarget != null) {
+            boolean enemyDead = !lastTarget.isAlive()
+                || (!Double.isNaN(lastEnemyHp) && lastEnemyHp <= 0.5f);
+            if (enemyDead) {
+                outcome = "win";
+                outcomeReason = "enemy down";
+                lastEnemyHp = 0.0;
+            } else {
+                outcomeReason = "enemy left range";
+            }
+        }
 
         // advance reconstructed timers from the state we're about to observe
         int selected = self.getInventory().getSelectedSlot();
@@ -218,6 +253,8 @@ public final class FightController {
         mode = Mode.IDLE;
         ActionApplier.releaseAll(mc);
         if (recorder != null) {
+            recorder.finish(outcome, outcomeReason, lastSelfHp,
+                sawEnemy ? lastEnemyHp : Double.NaN);
             recorder.close();
             recorder = null;
         }
@@ -230,6 +267,12 @@ public final class FightController {
         lastSelectedSlot = -1;
         lastSelfSeen = null;
         targetLabel = null;
+        sawEnemy = false;
+        lastSelfHp = Double.NaN;
+        lastEnemyHp = Double.NaN;
+        lastTarget = null;
+        outcome = "unknown";
+        outcomeReason = "manual stop";
     }
 
     private void fetchSpecAsync() {
