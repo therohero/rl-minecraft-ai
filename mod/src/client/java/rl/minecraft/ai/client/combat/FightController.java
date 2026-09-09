@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ChatScreen;
+import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ServerInfo;
 import net.minecraft.client.world.ClientWorld;
@@ -281,13 +282,7 @@ public final class FightController {
             return;
         }
 
-        // --- pause gate ---
-        String pause = pauseReason(mc);
-        if (pause != null) {
-            enterPause(mc, pause);
-            return;
-        }
-        leavePause();
+        GameMode gm = gameMode(mc);
 
         // --- respawn / new player-entity instance (== a death mid-fight) ---
         if (self != lastSelfSeen) {
@@ -320,23 +315,28 @@ public final class FightController {
             if (guard != null) guard.onRespawn();
         }
 
-        GameMode gm = gameMode(mc);
+        // --- death detection: BEFORE the pause gate, so the death screen
+        //     (which is a Screen) is read as a death, not a pause ---
         if (!self.isAlive()) {
             String r = deathWatch.poll(self, world, gm);
             if (r != null && handleDeath(mc, r)) return;
             ActionApplier.releaseAll(mc);
             return;
         }
-
-        // re-arm death detection once we're alive and off the floor again
         if (pendingRearm && self.getHealth() > cfg.deathHpFloor) {
             deathWatch.rearm();
             pendingRearm = false;
         }
-
-        // --- death detection (vanilla + plugin-blocked) ---
         String death = deathWatch.poll(self, world, gm);
         if (death != null && handleDeath(mc, death)) return;
+
+        // --- pause gate (GUI open / spectator, while alive) ---
+        String pause = pauseReason(mc);
+        if (pause != null) {
+            enterPause(mc, pause);
+            return;
+        }
+        leavePause();
 
         // --- who last hit us ---
         trackAttacker(self, world);
@@ -400,7 +400,11 @@ public final class FightController {
     // ------------------------------------------------------------------ helpers
 
     private String pauseReason(MinecraftClient mc) {
-        if (cfg.pauseOnScreen && mc.currentScreen != null && !(mc.currentScreen instanceof ChatScreen)) {
+        ClientPlayerEntity self = mc.player;
+        if (self != null && !self.isAlive()) return null; // handled by the death path
+        if (cfg.pauseOnScreen && mc.currentScreen != null
+            && !(mc.currentScreen instanceof ChatScreen)
+            && !(mc.currentScreen instanceof DeathScreen)) {
             return "screen open";
         }
         if (gameMode(mc) == GameMode.SPECTATOR) return "spectator";
