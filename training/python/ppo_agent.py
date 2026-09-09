@@ -46,6 +46,7 @@ class ActorCritic(nn.Module):
         hidden_size: int = HIDDEN,
         num_layers: int = NUM_LAYERS,
         slot_dim: int = HOTBAR_ACTION_DIM,
+        lstm_hidden: int = 0,
     ):
         super().__init__()
         if num_layers < 1:
@@ -53,6 +54,12 @@ class ActorCritic(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.slot_dim = slot_dim
+        # `lstm_hidden > 0` swaps the memoryless MLP for a recurrent head: a
+        # single-layer LSTM after the trunk carries state across ticks, so the
+        # policy has unbounded (truncated-BPTT) memory for the POMDP instead of
+        # the fixed window `--frame-stack` gives. The MLP stays the default.
+        self.lstm_hidden = lstm_hidden
+        self.recurrent = lstm_hidden > 0
 
         layers: list[nn.Module] = []
         in_dim = obs_dim
@@ -61,26 +68,49 @@ class ActorCritic(nn.Module):
             layers.append(nn.Tanh())
             in_dim = hidden_size
         self.trunk = nn.Sequential(*layers)
-        self.continuous_mean = nn.Linear(hidden_size, CONTINUOUS_ACTION_DIM)
+        head_dim = hidden_size
+        if self.recurrent:
+            self.lstm = nn.LSTM(hidden_size, lstm_hidden)
+            head_dim = lstm_hidden
+        self.continuous_mean = nn.Linear(head_dim, CONTINUOUS_ACTION_DIM)
         self.continuous_log_std = nn.Parameter(torch.zeros(CONTINUOUS_ACTION_DIM) - 0.5)
-        self.binary_logits = nn.Linear(hidden_size, BINARY_ACTION_DIM)
-        self.slot_logits = nn.Linear(hidden_size, slot_dim)
-        self.value_head = nn.Linear(hidden_size, 1)
+        self.binary_logits = nn.Linear(head_dim, BINARY_ACTION_DIM)
+        self.slot_logits = nn.Linear(head_dim, slot_dim)
+        self.value_head = nn.Linear(head_dim, 1)
 
-    def forward(self, obs: torch.Tensor):
-        h = self.trunk(obs)
-        mean = self.continuous_mean(h)
+    def zero_hidden(self, batch: int, device: torch.device | None = None):
+        """A fresh zeroed `(h, c)` LSTM state for `batch` slots, or `None` for
+        the non-recurrent MLP."""
+        if not self.recurrent:
+            return None
+        if device is None:
+            device = self.continuous_log_std.device
+        z = torch.zeros(1, batch, self.lstm_hidden, device=device)
+        return (z, z.clone())
+
+    def forward(self, obs: torch.Tensor, hidden=None):
+        feat = self.trunk(obs)
+        new_hidden = None
+        if self.recurrent:
+            # `obs` is [N, D] on the rollout hot path (one timestep) and
+            # [T, N, D] in the PPO update (a whole sequence); the LSTM wants a
+            # leading time axis either way.
+            single = feat.dim() == 2
+            seq = feat.unsqueeze(0) if single else feat
+            seq, new_hidden = self.lstm(seq, hidden)
+            feat = seq.squeeze(0) if single else seq
+        mean = self.continuous_mean(feat)
         # Every continuous action is tanh-squashed, so a std much above 1.0
         # in this raw pre-squash space makes the squashed action a near-
         # uniform +-1 coin flip regardless of the mean; cap log_std at 0.
         log_std = self.continuous_log_std.expand_as(mean).clamp(-3.0, 0.0)
-        binary_logits = self.binary_logits(h)
-        slot_logits = self.slot_logits(h)
-        value = self.value_head(h).squeeze(-1)
-        return mean, log_std, binary_logits, slot_logits, value
+        binary_logits = self.binary_logits(feat)
+        slot_logits = self.slot_logits(feat)
+        value = self.value_head(feat).squeeze(-1)
+        return mean, log_std, binary_logits, slot_logits, value, new_hidden
 
     @torch.no_grad()
-    def act(self, obs: torch.Tensor):
+    def act(self, obs: torch.Tensor, hidden=None):
         """Samples an action for rollout collection.
 
         Runs every env step, so the sampling is done with plain tensor ops
@@ -90,7 +120,7 @@ class ActorCritic(nn.Module):
         `evaluate()` - which still uses the distribution classes - reproduces
         these values (guarded by test_evaluate_matches_act_logprob).
         """
-        mean, log_std, binary_logits, slot_logits, value = self.forward(obs)
+        mean, log_std, binary_logits, slot_logits, value, new_hidden = self.forward(obs, hidden)
         std = log_std.exp()
 
         # Continuous: reparameterised Gaussian sample + its log-prob.
@@ -118,6 +148,7 @@ class ActorCritic(nn.Module):
             "slot_action": slot_action,
             "logprob": cont_logprob + binary_logprob + slot_logprob,
             "value": value,
+            "hidden": new_hidden,
         }
 
     def evaluate(
@@ -126,9 +157,12 @@ class ActorCritic(nn.Module):
         raw_cont: torch.Tensor,
         binary_action: torch.Tensor,
         slot_action: torch.Tensor,
+        hidden=None,
     ):
-        """Recomputes log-probs/entropy/value for a PPO update pass."""
-        mean, log_std, binary_logits, slot_logits, value = self.forward(obs)
+        """Recomputes log-probs/entropy/value for a PPO update pass. Returns
+        `(logprob, entropy, value, new_hidden)` - `new_hidden` is `None` for
+        the MLP and the carried LSTM state for the recurrent head."""
+        mean, log_std, binary_logits, slot_logits, value, new_hidden = self.forward(obs, hidden)
         std = log_std.exp()
 
         cont_dist = Normal(mean, std)
@@ -145,16 +179,26 @@ class ActorCritic(nn.Module):
 
         logprob = cont_logprob + binary_logprob + slot_logprob
         entropy = cont_entropy + binary_entropy + slot_entropy
-        return logprob, entropy, value
+        return logprob, entropy, value, new_hidden
 
 
 class RolloutBuffer:
     """Fixed-length rollout storage for `num_slots` parallel agents."""
 
-    def __init__(self, rollout_len: int, num_slots: int, obs_dim: int, device: torch.device):
+    def __init__(self, rollout_len: int, num_slots: int, obs_dim: int, device: torch.device,
+                 lstm_hidden: int = 0):
         self.rollout_len = rollout_len
         self.num_slots = num_slots
         self.device = device
+        # For a recurrent policy: the LSTM state entering this rollout, per
+        # slot. Truncated BPTT in `_ppo_update_recurrent` replays the sequence
+        # from here; the per-step `done` column resets it at episode edges.
+        self.lstm_hidden = lstm_hidden
+        if lstm_hidden > 0:
+            self.init_h = torch.zeros(1, num_slots, lstm_hidden, device=device)
+            self.init_c = torch.zeros(1, num_slots, lstm_hidden, device=device)
+        else:
+            self.init_h = self.init_c = None
 
         shape = (rollout_len, num_slots)
         self.obs = torch.zeros(*shape, obs_dim, device=device)
@@ -179,6 +223,18 @@ class RolloutBuffer:
         self.value[i] = value
         self.ptr += 1
 
+    def set_init_hidden(self, hidden) -> None:
+        """Store the LSTM state the next rollout starts from (`None` = zeros,
+        e.g. the very first update). No-op for the MLP."""
+        if self.lstm_hidden <= 0:
+            return
+        if hidden is None:
+            self.init_h.zero_()
+            self.init_c.zero_()
+        else:
+            self.init_h.copy_(hidden[0].detach())
+            self.init_c.copy_(hidden[1].detach())
+
     def full(self) -> bool:
         return self.ptr >= self.rollout_len
 
@@ -199,6 +255,9 @@ class RolloutBuffer:
         other.num_slots = self.num_slots
         other.device = device
         other.ptr = self.ptr
+        other.lstm_hidden = self.lstm_hidden
+        other.init_h = None if self.init_h is None else self.init_h.to(device)
+        other.init_c = None if self.init_c is None else self.init_c.to(device)
         for name in (
             "obs",
             "raw_cont",
@@ -244,6 +303,13 @@ def ppo_update(
     Opponent-controlled slots are still collected into the buffer (their
     transitions drive the sim) but must not train the policy toward imitating
     a frozen snapshot or the scripted bot."""
+    if getattr(buffer, "lstm_hidden", 0) > 0:
+        return _ppo_update_recurrent(
+            model, optimizer, buffer, advantages, returns,
+            epochs=epochs, minibatch_size=minibatch_size, clip_ratio=clip_ratio,
+            value_coef=value_coef, entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm, sample_mask=sample_mask,
+        )
     T, N = buffer.rollout_len, buffer.num_slots
     obs = buffer.obs.reshape(T * N, -1)
     raw_cont = buffer.raw_cont.reshape(T * N, -1)
@@ -278,7 +344,7 @@ def ppo_update(
         for start in range(0, total_size, minibatch_size):
             idx = perm[start : start + minibatch_size]
 
-            logprob, entropy, value = model.evaluate(
+            logprob, entropy, value, _ = model.evaluate(
                 obs[idx], raw_cont[idx], binary_action[idx], slot_action[idx]
             )
             logratio = logprob - old_logprob[idx]
@@ -304,6 +370,113 @@ def ppo_update(
                 approx_kl_sum += ((ratio - 1.0) - logratio).mean()
                 clip_frac_sum += ((ratio - 1.0).abs() > clip_ratio).float().mean()
 
+            policy_loss_sum += policy_loss.detach()
+            value_loss_sum += value_loss.detach()
+            entropy_sum += entropy_bonus.detach()
+            num_updates += 1
+
+    denom = max(num_updates, 1)
+    return {
+        "policy_loss": (policy_loss_sum / denom).item(),
+        "value_loss": (value_loss_sum / denom).item(),
+        "entropy": (entropy_sum / denom).item(),
+        "approx_kl": (approx_kl_sum / denom).item(),
+        "clip_frac": (clip_frac_sum / denom).item(),
+    }
+
+
+def _ppo_update_recurrent(
+    model: ActorCritic,
+    optimizer: torch.optim.Optimizer,
+    buffer: RolloutBuffer,
+    advantages: torch.Tensor,
+    returns: torch.Tensor,
+    epochs: int,
+    minibatch_size: int,
+    clip_ratio: float,
+    value_coef: float,
+    entropy_coef: float,
+    max_grad_norm: float,
+    sample_mask: torch.Tensor | None,
+):
+    """PPO update for the LSTM head. The minibatch unit is a whole slot
+    sequence, not a flattened transition: the rollout is replayed step by step
+    from `buffer.init_h/init_c` so gradients flow back through time (truncated
+    at the rollout boundary), with the hidden state zeroed for any slot whose
+    previous step ended its episode. `sample_mask` drops opponent slots from
+    both the loss and the advantage normalization, exactly as the MLP path.
+    """
+    T, N = buffer.rollout_len, buffer.num_slots
+    device = buffer.obs.device
+    obs = buffer.obs                    # [T, N, D]
+    raw_cont = buffer.raw_cont          # [T, N, 4]
+    binary_action = buffer.binary_action
+    slot_action = buffer.slot_action    # [T, N]
+    old_logprob = buffer.logprob        # [T, N]
+    done = buffer.done                  # [T, N]
+
+    if sample_mask is not None:
+        slot_keep = sample_mask.to(device=device, dtype=torch.bool)
+    else:
+        slot_keep = torch.ones(N, dtype=torch.bool, device=device)
+    train_slots = torch.nonzero(slot_keep, as_tuple=False).squeeze(-1)
+
+    adv_keep = advantages[:, slot_keep]
+    adv = (advantages - adv_keep.mean()) / (adv_keep.std() + 1e-8)
+    ret = returns
+
+    seq_per_mb = max(1, minibatch_size // T)
+
+    policy_loss_sum = torch.zeros((), device=device)
+    value_loss_sum = torch.zeros((), device=device)
+    entropy_sum = torch.zeros((), device=device)
+    approx_kl_sum = torch.zeros((), device=device)
+    clip_frac_sum = torch.zeros((), device=device)
+    num_updates = 0
+
+    for _ in range(epochs):
+        perm = train_slots[torch.randperm(train_slots.numel(), device=device)]
+        for start in range(0, perm.numel(), seq_per_mb):
+            sl = perm[start : start + seq_per_mb]
+            h = buffer.init_h[:, sl].contiguous()
+            c = buffer.init_c[:, sl].contiguous()
+
+            lp_steps, ent_steps, val_steps = [], [], []
+            for t in range(T):
+                if t > 0:
+                    keep = (1.0 - done[t - 1, sl]).view(1, -1, 1)
+                    h = h * keep
+                    c = c * keep
+                lp, ent, val, (h, c) = model.evaluate(
+                    obs[t, sl], raw_cont[t, sl], binary_action[t, sl], slot_action[t, sl], (h, c)
+                )
+                lp_steps.append(lp)
+                ent_steps.append(ent)
+                val_steps.append(val)
+
+            logprob = torch.stack(lp_steps)        # [T, b]
+            entropy = torch.stack(ent_steps)
+            value = torch.stack(val_steps)
+            mb_adv = adv[:, sl]
+            mb_ret = ret[:, sl]
+
+            logratio = logprob - old_logprob[:, sl]
+            ratio = logratio.exp()
+            surr1 = ratio * mb_adv
+            surr2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * mb_adv
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss = ((value - mb_ret) ** 2).mean()
+            entropy_bonus = entropy.mean()
+            loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_bonus
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+
+            with torch.no_grad():
+                approx_kl_sum += ((ratio - 1.0) - logratio).mean()
+                clip_frac_sum += ((ratio - 1.0).abs() > clip_ratio).float().mean()
             policy_loss_sum += policy_loss.detach()
             value_loss_sum += value_loss.detach()
             entropy_sum += entropy_bonus.detach()

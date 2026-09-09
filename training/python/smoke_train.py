@@ -19,7 +19,10 @@ then asserts on the run's own log output + the files it left behind:
   5. a `--sim-config` with splash potions + enchantments trains and
      evaluates without error;
   6. a `--terrain-curriculum-updates` run ramps the terrain amplitude up
-     via mid-run sim relaunches and completes.
+     via mid-run sim relaunches and completes;
+  7. an `--lstm` (recurrent head) run trains, resumes, and evaluates; a head
+     mismatch on resume is rejected and `export_model.py` refuses the
+     recurrent checkpoint for live play.
 
 Exit code 0 = the training loop is healthy. Non-zero prints what failed.
 
@@ -144,7 +147,7 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="rl-smoke-")
     ckpt = os.path.join(tmp, "checkpoints")
     try:
-        print(f"[1/6] fresh run: {FRESH_UPDATES} updates -> {ckpt}")
+        print(f"[1/7] fresh run: {FRESH_UPDATES} updates -> {ckpt}")
         log1 = _run_training(sim_binary, ckpt, FRESH_UPDATES, fresh=True)
         _require(os.path.isfile(os.path.join(ckpt, "latest.pt")), "fresh run left no latest.pt", log1)
         numbered = sorted(f for f in os.listdir(ckpt) if re.match(r"policy_update_\d+\.pt$", f))
@@ -160,7 +163,7 @@ def main() -> int:
                  f"fresh run stopped at update {_last_update_in_log(log1)}, expected {FRESH_UPDATES}", log1)
         print(f"      ok: latest.pt + {len(numbered)} numbered snapshot(s) + {len(persisted)} league snapshot(s)")
 
-        print(f"[2/6] resume run: continue to {RESUME_UPDATES} updates")
+        print(f"[2/7] resume run: continue to {RESUME_UPDATES} updates")
         log2 = _run_training(sim_binary, ckpt, RESUME_UPDATES, fresh=False)
         m = re.search(r"resumed from .*latest\.pt at update=(\d+)", log2)
         _require(m is not None, "resume run did not log 'resumed from ... at update=<n>'", log2)
@@ -185,7 +188,7 @@ def main() -> int:
             _require(col in rows[0], f"metrics.csv is missing the '{col}' column", log1 + log2)
         print(f"      ok: metrics.csv has {len(rows)} rows through update {updates[-1]} (appended on resume)")
 
-        print("[3/6] eval run: rate the checkpoints against each other + scripted")
+        print("[3/7] eval run: rate the checkpoints against each other + scripted")
         log3 = _run_eval(sim_binary, ckpt)
         _require("evaluating" in log3 and "players" in log3, "evaluate.py did not start a tournament", log3)
         _require(re.search(r"candidate:latest\.pt\b.*<- candidate", log3) is not None,
@@ -196,7 +199,7 @@ def main() -> int:
         print("      ok: Elo table printed with the candidate rated against the ladder")
 
         fs_ckpt = os.path.join(tmp, "fs")
-        print(f"[4/6] frame-stack run: --frame-stack 3 fresh + resume + eval -> {fs_ckpt}")
+        print(f"[4/7] frame-stack run: --frame-stack 3 fresh + resume + eval -> {fs_ckpt}")
         fs1 = _run_training(sim_binary, fs_ckpt, 4, fresh=True, extra=["--frame-stack", "3"])
         _require("frame_stack 3" in fs1, "train.py did not report the stacked obs_dim", fs1)
         fs2 = _run_training(sim_binary, fs_ckpt, 8, fresh=False, extra=["--frame-stack", "3"])
@@ -224,14 +227,14 @@ def main() -> int:
         with open(cfg_path, "w") as f:
             f.write('{"kit":"uhc","splash_potions":{"poison":4,"speed":2},'
                     '"enchants":{"fire_aspect":2,"flame":1,"knockback_resistance":0.3}}')
-        print(f"[5/6] potions + enchants config run: --sim-config {cfg_path}")
+        print(f"[5/7] potions + enchants config run: --sim-config {cfg_path}")
         pot = _run_training(sim_binary, pot_ckpt, 4, fresh=True, extra=["--sim-config", cfg_path])
         _require(_last_update_in_log(pot) == 4, f"potion/enchant run stopped early: {_last_update_in_log(pot)}", pot)
         _run_eval(sim_binary, pot_ckpt)
         print("      ok: a potion + enchant loadout trains and evaluates without error")
 
         cur_ckpt = os.path.join(tmp, "cur")
-        print("[6/6] terrain curriculum run: amplitude ramp over 4 updates in 2 steps")
+        print("[6/7] terrain curriculum run: amplitude ramp over 4 updates in 2 steps")
         cur = _run_training(sim_binary, cur_ckpt, 6, fresh=True, extra=[
             "--terrain-curriculum-updates", "4", "--terrain-curriculum-stages", "2",
             "--terrain-max-amplitude", "3.0"])
@@ -239,6 +242,31 @@ def main() -> int:
         _require("sim relaunch" in cur, "curriculum never relaunched the sim at an amplitude step", cur)
         _require(_last_update_in_log(cur) == 6, f"curriculum run stopped early: {_last_update_in_log(cur)}", cur)
         print("      ok: terrain amplitude ramps up via sim relaunches, run completes")
+
+        lstm_ckpt = os.path.join(tmp, "lstm")
+        print(f"[7/7] LSTM run: --lstm fresh + resume + eval + export refusal -> {lstm_ckpt}")
+        ls1 = _run_training(sim_binary, lstm_ckpt, 4, fresh=True, extra=["--lstm", "--lstm-hidden", "16"])
+        _require("head=lstm(16)" in ls1, "train.py did not report the recurrent head", ls1)
+        _require(_last_update_in_log(ls1) == 4, f"lstm run stopped early: {_last_update_in_log(ls1)}", ls1)
+        ls2 = _run_training(sim_binary, lstm_ckpt, 8, fresh=False, extra=["--lstm", "--lstm-hidden", "16"])
+        _require(re.search(r"resumed from .*at update=5", ls2) is not None,
+                 "lstm run did not resume at the right update", ls2)
+        _require(_last_update_in_log(ls2) == 8, f"lstm resume stopped early: {_last_update_in_log(ls2)}", ls2)
+
+        # resuming the same dir without --lstm (MLP head) must be rejected
+        ls_mismatch = subprocess.run(
+            [sys.executable, os.path.join(HERE, "train.py"), "--sim-binary", sim_binary,
+             "--checkpoint-dir", lstm_ckpt, "--total-updates", "8", *COMMON_ARGS],
+            cwd=HERE, capture_output=True, text=True, timeout=120)
+        _require(ls_mismatch.returncode != 0 and "lstm" in (ls_mismatch.stdout + ls_mismatch.stderr).lower(),
+                 "resuming an --lstm checkpoint with the MLP head should have been rejected",
+                 ls_mismatch.stdout + ls_mismatch.stderr)
+
+        _run_eval(sim_binary, lstm_ckpt)
+        ls_exp = _run_export(os.path.join(lstm_ckpt, "latest.pt"))
+        _require(ls_exp.returncode != 0 and "lstm" in (ls_exp.stdout + ls_exp.stderr).lower(),
+                 "export_model.py should refuse a recurrent checkpoint", ls_exp.stdout + ls_exp.stderr)
+        print("      ok: LSTM head trains, resumes, evaluates; head mismatch + live export refused")
 
         print("\nSMOKE OK - training loop is healthy")
         return 0

@@ -193,10 +193,10 @@ on **any** exit - normal finish, `Ctrl+C`, or crash (with `SIGINT` ignored
 for that critical section so an impatient second `Ctrl+C` can't corrupt
 it). Re-running `./run.sh` with the same command resumes from `latest.pt`
 (model + optimizer state + update count); `--fresh` wipes everything. A
-checkpoint stores the trunk shape, `obs_dim`, `frame_stack`, the sim
-constants it trained against, and the full `SimConfig` - resuming refuses
-to load if the architecture, observation space or frame-stack depth no
-longer matches.
+checkpoint stores the trunk shape (including the LSTM width, if any),
+`obs_dim`, `frame_stack`, the sim constants it trained against, and the
+full `SimConfig` - resuming refuses to load if the architecture,
+observation space or frame-stack depth no longer matches.
 
 ### Frame stacking (`--frame-stack N`)
 
@@ -209,6 +209,20 @@ cleared the tick its match ends. `evaluate.py` picks the depth up from
 the candidate checkpoint. The live inference bridges (`azalea-bot`, `mod`)
 build a single frame and don't stack yet, so `export_model.py` refuses an
 `N>1` checkpoint - train the deployable policy with `--frame-stack 1`.
+
+### LSTM policy head (`--lstm`)
+
+Where `--frame-stack` gives the MLP a *fixed* window of history, `--lstm`
+replaces the memoryless trunk head with a single-layer LSTM
+(`--lstm-hidden`, default 256) that carries state across ticks -
+unbounded memory for the POMDP, truncated at the rollout boundary for
+BPTT. The rollout loop carries the hidden state per slot and zeroes it the
+tick a match ends (like the frame stacker's history clear); the PPO update
+(`_ppo_update_recurrent`) replays each slot's rollout as a sequence, one
+minibatch = a batch of whole slot-sequences. `evaluate.py` carries hidden
+state per player. The MLP stays the default. The live inference bridges
+keep no recurrent state between ticks yet, so `export_model.py` refuses an
+`--lstm` checkpoint - train the deployable policy without it.
 
 ### Terrain curriculum
 

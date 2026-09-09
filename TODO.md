@@ -6,10 +6,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Training
 
-- [ ] **LSTM policy head.** Frame stacking (`--frame-stack N`, done) gives
-  the MLP a fixed short history; an LSTM head would carry unbounded memory
-  for the POMDP. Needs sequence-based PPO (hidden state through the rollout
-  buffer, reset on done, truncated BPTT). Keep the MLP the default.
 - [ ] **Separate-process rollout pipeline.** Perf note in the training-perf
   memory: after `--update-threads` / auto rollout threads, the next throughput
   lever is decoupling rollout collection from the update loop (or a GPU box).
@@ -19,6 +15,12 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 - [ ] **Inference server hot-reload.** `inference_server.py` only picks up new
   weights on restart. Watch `model/` (or a `SIGHUP`) and reload `policy.pt` +
   `spec.json` in place.
+- [ ] **Live LSTM inference.** Training supports `--lstm` (recurrent policy
+  head) but the bridges keep no state between ticks, so `export_model.py`
+  refuses an `--lstm` checkpoint. Keep the last LSTM `(h, c)` per bot in
+  `azalea_bot` + the mod (zeroed on match start), thread it through the
+  `policy.pt` call, and read `lstm_hidden` from `spec.json`. Pairs with
+  live frame stacking below.
 - [ ] **Live frame stacking.** Training supports `--frame-stack N` but the
   bridges build one frame, so `export_model.py` refuses `N>1` checkpoints.
   Keep the last `N` observations per bot in `azalea_bot` + the mod (clearing

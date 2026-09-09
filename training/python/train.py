@@ -392,6 +392,24 @@ def main():
         "rarely helps a low-dim control task and slows every rollout step.",
     )
     net.add_argument(
+        "--lstm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="swap the memoryless MLP head for a recurrent LSTM head (default off). Unlike "
+        "--frame-stack's fixed window, the LSTM carries unbounded state across ticks (truncated "
+        "at the rollout boundary for BPTT), which suits the latency-delayed, occlusion-limited "
+        "POMDP view of other players. The PPO update replays each slot's rollout as a sequence. "
+        "Changing this makes existing checkpoints unresumable (pass --fresh). NOTE: the live "
+        "inference bridges keep no recurrent state yet, so an --lstm checkpoint can't be exported "
+        "for live play.",
+    )
+    net.add_argument(
+        "--lstm-hidden",
+        type=int,
+        default=256,
+        help="LSTM hidden width when --lstm is set (default 256). Ignored for the MLP head.",
+    )
+    net.add_argument(
         "--frame-stack",
         type=int,
         default=1,
@@ -763,16 +781,22 @@ def main():
         # The width the policy actually sees: `--frame-stack` frames concatenated.
         obs_dim = base_obs_dim * frame_stack
         slot_dim = features.HOTBAR_ACTION_DIM
+        lstm_hidden = args.lstm_hidden if args.lstm else 0
         log.info(
             "kit=%s, %dv%d, %d policy slots, obs_dim=%d (base %d x frame_stack %d), "
-            "held-slot classes=%d (%d select + %d hotkey)",
+            "held-slot classes=%d (%d select + %d hotkey), head=%s",
             env.kit, env.team_size, env.team_size, num_slots, obs_dim, base_obs_dim, frame_stack,
             slot_dim, features.HOTBAR_SLOTS, features.ITEM_COUNT,
+            f"lstm({lstm_hidden})" if lstm_hidden else "mlp",
         )
 
-        model = ActorCritic(
-            obs_dim, hidden_size=args.hidden_size, num_layers=args.num_layers, slot_dim=slot_dim
-        ).to(device)
+        def make_policy():
+            return ActorCritic(
+                obs_dim, hidden_size=args.hidden_size, num_layers=args.num_layers,
+                slot_dim=slot_dim, lstm_hidden=lstm_hidden,
+            )
+
+        model = make_policy().to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
         start_update = 1
@@ -786,11 +810,14 @@ def main():
             ckpt_arch = ckpt.get("arch") or {}
             requested_arch = {"hidden_size": args.hidden_size, "num_layers": args.num_layers}
             ckpt_slot_dim = ckpt_arch.get("slot_dim", slot_dim)
-            if any(ckpt_arch.get(k) != v for k, v in requested_arch.items()) or ckpt_slot_dim != slot_dim:
+            ckpt_lstm_hidden = ckpt_arch.get("lstm_hidden", 0)
+            if (any(ckpt_arch.get(k) != v for k, v in requested_arch.items())
+                    or ckpt_slot_dim != slot_dim or ckpt_lstm_hidden != lstm_hidden):
                 raise SystemExit(
                     f"checkpoint architecture {ckpt_arch} != requested "
-                    f"hidden_size={args.hidden_size} num_layers={args.num_layers} slot_dim={slot_dim}; "
-                    "pass matching --hidden-size/--num-layers (and kit) to resume, or --fresh to start over"
+                    f"hidden_size={args.hidden_size} num_layers={args.num_layers} slot_dim={slot_dim} "
+                    f"lstm_hidden={lstm_hidden}; pass matching --hidden-size/--num-layers/--lstm "
+                    "(and kit) to resume, or --fresh to start over"
                 )
             ckpt_frame_stack = ckpt.get("frame_stack", 1)
             if ckpt_frame_stack != frame_stack:
@@ -830,9 +857,7 @@ def main():
         # below) right before the update, where the GPU's larger minibatches
         # actually do help. When `device` is already CPU this is just an
         # alias - no extra cost, no extra copies.
-        collect_model = model if device.type == "cpu" else ActorCritic(
-            obs_dim, hidden_size=args.hidden_size, num_layers=args.num_layers, slot_dim=slot_dim
-        )
+        collect_model = model if device.type == "cpu" else make_policy()
         if collect_model is not model:
             collect_model.load_state_dict(model.state_dict())
 
@@ -846,16 +871,16 @@ def main():
             if collect_model is not model:
                 collect_model.forward = torch.compile(collect_model.forward, mode="reduce-overhead")
 
-        buffer = RolloutBuffer(args.rollout_len, num_slots, obs_dim, torch.device("cpu"))
+        buffer = RolloutBuffer(
+            args.rollout_len, num_slots, obs_dim, torch.device("cpu"), lstm_hidden=lstm_hidden
+        )
 
         # Opponent league: for --opponent-fraction of the arenas, team B is
         # played by a frozen snapshot or the scripted bot instead of the live
         # policy. `learner_slots` marks the slots that still train.
         opp_rng = np.random.default_rng(args.seed)
         pool = OpponentPool(
-            make_model=lambda: ActorCritic(
-                obs_dim, hidden_size=args.hidden_size, num_layers=args.num_layers, slot_dim=slot_dim
-            ),
+            make_model=make_policy,
             capacity=args.opponent_pool_size,
             snapshot_dir=os.path.join(args.checkpoint_dir, "league"),
         )
@@ -886,6 +911,17 @@ def main():
         if args.obs_noise > 0.0:
             cur_obs_np = cur_obs_np + opp_rng.normal(0.0, args.obs_noise, cur_obs_np.shape).astype(np.float32)
         obs = torch.as_tensor(stacker.reset(cur_obs_np) if stacker else cur_obs_np)
+
+        # Carried LSTM state for the recurrent head (`None` for the MLP). Reset
+        # per-slot the tick that slot's episode ends, mirroring the frame
+        # stacker's history clear.
+        hidden = collect_model.zero_hidden(num_slots)
+
+        def _reset_hidden(h, dones_mask):
+            if h is None:
+                return None
+            keep = torch.as_tensor(~np.asarray(dones_mask, dtype=bool), dtype=torch.float32).view(1, -1, 1)
+            return (h[0] * keep, h[1] * keep)
 
         # Rolling win-rate / episode-return trackers purely for console logging.
         episode_return = np.zeros(num_slots, dtype=np.float32)
@@ -923,6 +959,7 @@ def main():
                             0.0, args.obs_noise, cur_obs_np.shape
                         ).astype(np.float32)
                     obs = torch.as_tensor(stacker.reset(cur_obs_np) if stacker else cur_obs_np)
+                    hidden = collect_model.zero_hidden(num_slots)
                     episode_return[:] = 0.0
 
             # Pick this iteration's opponent (shared by every opponent arena).
@@ -933,19 +970,28 @@ def main():
             iter_learner = learner_slots if opp_kind != "none" else np.ones(num_slots, dtype=bool)
             iter_mask_t = learner_mask_t if opp_kind != "none" else None
 
+            # The LSTM state entering this rollout is what truncated BPTT
+            # replays from; the opponent net carries its own state, freshly
+            # zeroed since a new opponent is drawn every iteration.
+            buffer.set_init_hidden(hidden)
+            opp_hidden = opp_net.zero_hidden(opp_idx.size) if opp_kind == "net" else None
+
             for _ in range(args.rollout_len):
-                act_out = collect_model.act(obs)
+                act_out = collect_model.act(obs, hidden)
                 actions = build_actions(act_out, num_slots)
 
                 if opp_kind == "scripted":
                     actions[opp_idx] = pool.scripted.actions(cur_obs_np[opp_idx])
                 elif opp_kind == "net":
                     with torch.no_grad():
-                        opp_out = opp_net.act(obs[opp_idx])
+                        opp_out = opp_net.act(obs[opp_idx], opp_hidden)
                     actions[opp_idx] = build_actions(opp_out, opp_idx.size)
 
                 next_obs_np, rewards, dones, info = env.step(actions)
                 total_env_steps += num_slots
+                hidden = _reset_hidden(act_out["hidden"], dones)
+                if opp_kind == "net":
+                    opp_hidden = _reset_hidden(opp_out["hidden"], dones[opp_idx])
 
                 buffer.add(
                     obs=obs,
@@ -979,7 +1025,7 @@ def main():
                 obs = torch.as_tensor(stacker.push(next_obs_np, dones) if stacker else next_obs_np)
 
             with torch.no_grad():
-                *_, last_value = collect_model.forward(obs)
+                *_, last_value, _ = collect_model.forward(obs, hidden)
 
             # Linearly anneal the entropy bonus from --entropy-coef-start down to
             # --entropy-coef-end over the run, so exploration is strong early on
@@ -1202,6 +1248,7 @@ def _save_checkpoint(
             "hidden_size": model.hidden_size,
             "num_layers": model.num_layers,
             "slot_dim": model.slot_dim,
+            "lstm_hidden": model.lstm_hidden,
         },
         "sim_constants": features.active_constants().__dict__,
         "sim_config": getattr(env, "sim_config", None),

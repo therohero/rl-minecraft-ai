@@ -100,6 +100,7 @@ def load_policy(path: str, device: torch.device, frame_stack: int) -> ActorCriti
         hidden_size=arch.get("hidden_size", 256),
         num_layers=arch.get("num_layers", 2),
         slot_dim=arch.get("slot_dim", features.HOTBAR_ACTION_DIM),
+        lstm_hidden=arch.get("lstm_hidden", 0),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -111,20 +112,22 @@ def load_policy(path: str, device: torch.device, frame_stack: int) -> ActorCriti
 # --------------------------------------------------------------------------
 
 @torch.no_grad()
-def policy_actions(model: ActorCritic, obs: torch.Tensor, sample: bool) -> np.ndarray:
-    """`[n, ACTION_FLOATS_PER_SLOT]` actions for the given observation rows.
-    `sample=False` takes the distribution's mode (tanh(mean), logit>0,
-    argmax) for a crisp, reproducible strength measurement."""
+def policy_actions(model: ActorCritic, obs: torch.Tensor, sample: bool, hidden=None):
+    """`([n, ACTION_FLOATS_PER_SLOT] actions, new_hidden)` for the given
+    observation rows. `sample=False` takes the distribution's mode
+    (tanh(mean), logit>0, argmax) for a crisp, reproducible strength
+    measurement. `new_hidden` is `None` for the MLP head."""
     if sample:
-        out = model.act(obs)
+        out = model.act(obs, hidden)
+        new_hidden = out["hidden"]
     else:
-        mean, _, binary_logits, slot_logits, _ = model.forward(obs)
+        mean, _, binary_logits, slot_logits, _, new_hidden = model.forward(obs, hidden)
         out = {
             "squashed_cont": torch.tanh(mean),
             "binary_action": (binary_logits > 0).to(mean.dtype),
             "slot_action": slot_logits.argmax(dim=-1),
         }
-    return build_actions(out, obs.shape[0])
+    return build_actions(out, obs.shape[0]), new_hidden
 
 
 # --------------------------------------------------------------------------
@@ -186,6 +189,13 @@ def run_tournament(env: SelfPlayArenaEnv, players: list[dict], matches_per_pair:
     wins = np.zeros((n, n))
     draws = np.zeros((n, n))
     scripted_bot = ScriptedOpponent()
+    # Per-net-player carried LSTM state (`None` for MLP players), full slot
+    # width and sliced per step by the slots that player currently controls;
+    # a slot is zeroed the tick its match ends.
+    hiddens = [
+        p["model"].zero_hidden(env.num_slots) if p["kind"] == "net" else None
+        for p in players
+    ]
 
     # Per-arena current pairing; None once there's nothing left to play.
     pairing: list[tuple[int, int] | None] = [queue.pop() if queue else None for _ in range(env.num_arenas)]
@@ -214,10 +224,23 @@ def run_tournament(env: SelfPlayArenaEnv, players: list[dict], matches_per_pair:
             if player["kind"] == "scripted":
                 actions[idx] = scripted_bot.actions(cur_obs_np[idx])
             else:
-                actions[idx] = policy_actions(player["model"], obs[idx], sample)
+                h_in = None
+                if hiddens[pid] is not None:
+                    h_in = (hiddens[pid][0][:, idx], hiddens[pid][1][:, idx])
+                acts, h_out = policy_actions(player["model"], obs[idx], sample, h_in)
+                actions[idx] = acts
+                if h_out is not None:
+                    hiddens[pid][0][:, idx] = h_out[0]
+                    hiddens[pid][1][:, idx] = h_out[1]
 
         next_obs, _, dones, info = env.step(actions)
         cur_obs_np = next_obs
+        if dones.any():
+            dmask = torch.as_tensor(np.asarray(dones, dtype=bool))
+            for hp in hiddens:
+                if hp is not None:
+                    hp[0][:, dmask] = 0.0
+                    hp[1][:, dmask] = 0.0
 
         for a, pair in enumerate(pairing):
             if pair is None:
