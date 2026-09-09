@@ -66,5 +66,35 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   writes `(obs, action)` per tick and the reward is reconstructed offline;
   logging the real win/loss/HP at episode end would tighten
   `train_from_episodes.py`.
+- [ ] **Safe live-server training (important).** `/fight train` today
+  assumes a cooperative target on your own world. To gather real data on an
+  actual PvP server without producing garbage episodes or getting banned,
+  roughly in priority order:
+  - **Stop fighting on death.** On death, hand control straight back to the
+    player - don't resume inputs the instant you respawn. A bot that
+    re-engages after every death is both useless data and an obvious ban.
+    `/fight stopfightingtoggle` opts back into fight-through-respawn for
+    auto-round arenas where that's actually wanted.
+  - **One episode per fight.** A `/fight train` session currently spans
+    everything until `/fight stop`. Cut a new episode file (+ its own
+    win/loss/HP outcome record) on each death / kill so
+    `train_from_episodes.py` sees clean per-fight returns.
+  - **Explicit target lock.** `TargetSelector.nearest` will swing at
+    bystanders on a populated server. Add `/fight target <name>` and/or
+    "only whoever last hit me" / "only inside this region", and never
+    auto-acquire a replacement once the locked target is gone.
+  - **Engage only when provoked or told.** Default to not attacking until
+    the target hits first (or you `/fight target` them); idle instead of
+    chasing when there's no valid target.
+  - **Auto-pause on menu / GUI / dimension change / spectator.** Stop
+    streaming inputs *and* dataset rows whenever the player has a screen
+    open or the server moved them out of the fight.
+  - **Mod-side anticheat naturalism.** `ClientGuard` is lighter than
+    `azalea_bot`'s guard; a server running Grim/Vulcan needs the same
+    reaction-delay / click-timing / rotation treatment. Pull the shared
+    logic into one place both bridges use.
+  - **Richer episode tags.** Record server address, opponent name, and a
+    real-match-vs-practice flag so offline training can filter / downweight
+    junk sessions.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.
