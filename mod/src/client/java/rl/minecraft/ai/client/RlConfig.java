@@ -19,7 +19,7 @@ import java.util.Properties;
  * max_pitch_deg_per_tick = 60
  * reach                  = 3.0                # only swing at a target within this many blocks
  * rotation_smoothing     = 0.7                # 1.0 = no smoothing, lower = softer accel onto target
- * aim_jitter_deg         = 0.4                # per-tick gaussian "hand tremor" mixed into rotation
+ * aim_jitter_deg         = 0.2                # sub-degree gaussian "hand tremor" mixed into rotation
  * aim_settle_deg         = 50                 # hold the attack one tick after a turn bigger than this
  * min_sneak_hold_ticks   = 3                  # debounce: min ticks a sneak state is held before flipping
  * require_line_of_sight    = true              # don't attack through a wall even if in reach cone
@@ -34,7 +34,7 @@ import java.util.Properties;
  * mouse_sensitivity        = -1                # -1 = use your in-game setting; else 0..1 to match it
  * max_yaw_accel_deg        = 18                # virtual-mouse accel cap (deg/tick^2) - no instant flicks
  * max_pitch_accel_deg      = 14
- * aim_latency_ticks        = 2                 # aim lags the policy's target by this many ticks (reaction)
+ * aim_latency_ticks        = 0                 # extra reaction lag in ticks (0 = off; accel cap already lags)
  * max_cps                  = 12                # click-rate ceiling on top of the real attack cooldown
  * click_jitter_ms          = 25                # gaussian spread on the min click gap (no metronome)
  * </pre>
@@ -78,7 +78,7 @@ public final class RlConfig {
         this.maxPitchDegPerTick = getDouble(p, "max_pitch_deg_per_tick", 60.0);
         this.reach = getDouble(p, "reach", 3.0);
         this.rotationSmoothing = getDouble(p, "rotation_smoothing", 0.7);
-        this.aimJitterDeg = getDouble(p, "aim_jitter_deg", 0.4);
+        this.aimJitterDeg = getDouble(p, "aim_jitter_deg", 0.2);
         this.aimSettleDeg = getDouble(p, "aim_settle_deg", 50.0);
         this.minSneakHoldTicks = (int) getDouble(p, "min_sneak_hold_ticks", 3);
         this.requireLineOfSight = getBoolean(p, "require_line_of_sight", true);
@@ -93,7 +93,7 @@ public final class RlConfig {
         this.mouseSensitivity = getDouble(p, "mouse_sensitivity", -1.0);
         this.maxYawAccelDeg = getDouble(p, "max_yaw_accel_deg", 18.0);
         this.maxPitchAccelDeg = getDouble(p, "max_pitch_accel_deg", 14.0);
-        this.aimLatencyTicks = Math.max(0, (int) getDouble(p, "aim_latency_ticks", 2));
+        this.aimLatencyTicks = Math.max(0, (int) getDouble(p, "aim_latency_ticks", 0));
         this.maxCps = getDouble(p, "max_cps", 12.0);
         this.clickJitterMs = getDouble(p, "click_jitter_ms", 25.0);
     }

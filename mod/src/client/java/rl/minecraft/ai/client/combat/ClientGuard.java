@@ -32,10 +32,16 @@ import java.util.Deque;
  *   <li>the result is converted to a whole number of <em>mouse counts</em>
  *       through the exact vanilla sensitivity curve
  *       ({@code (s*0.6+0.2)^3 * 8}, then {@code * 0.15}) with the leftover
- *       fraction carried to the next tick, and applied via
- *       {@link ClientPlayerEntity#changeLookDirection} - the same call path a
- *       real mouse takes.</li>
+ *       fraction carried to the next tick.</li>
  * </ol>
+ *
+ * That per-tick plan is then handed out one frame at a time by
+ * {@link #applyFrame} (called from a render-frame hook) so the camera glides
+ * at the real framerate instead of stepping 20&times;/s - vanilla applies
+ * mouse motion per frame, not per tick, and the old "set the whole delta at
+ * tick start" made every turn visibly choppy. The plan always lands in full
+ * before the next tick's movement packet, so what the server sees is
+ * unchanged: one bounded, quantised, tremored delta per tick.
  *
  * Every rotation the server sees is therefore an integer multiple of this
  * client's mouse-count quantum with bounded velocity and acceleration and
@@ -68,6 +74,14 @@ public final class ClientGuard {
     /** Actual applied yaw turn last tick (deg) - feeds the aim-settle gate. */
     private double lastYawTurnDeg;
 
+    // this tick's rotation plan, doled out per frame by applyFrame()
+    private long planCountsX;
+    private long planCountsY;
+    private long appliedCountsX;
+    private long appliedCountsY;
+    private long planStartNanos = System.nanoTime();
+    private static final double TICK_NANOS = 50_000_000.0;
+
     // sneak debounce
     private boolean sneakState;
     private int sneakHeldTicks = Integer.MAX_VALUE / 2;
@@ -92,11 +106,15 @@ public final class ClientGuard {
     }
 
     /**
-     * Drive the virtual mouse one tick toward the policy's requested yaw/pitch
-     * delta (degrees) and apply the resulting whole-mouse-count turn to
-     * {@code self} via the vanilla look path.
+     * Once per tick: run the virtual-mouse model against the policy's
+     * requested yaw/pitch delta (degrees) and stash the resulting
+     * whole-mouse-count turn as this tick's plan. Any unspent counts from the
+     * previous tick's plan are flushed onto {@code self} first, so every
+     * tick's rotation lands in full before its movement packet.
      */
-    public void applyLook(ClientPlayerEntity self, double rawYawDeltaDeg, double rawPitchDeltaDeg) {
+    public void planLook(ClientPlayerEntity self, double rawYawDeltaDeg, double rawPitchDeltaDeg) {
+        flushPlan(self);
+
         // 1. reaction delay: act on the turn rate we wanted N ticks ago.
         reactionBuf.addLast(new double[] { rawYawDeltaDeg, rawPitchDeltaDeg });
         double wantYawRate = 0.0;
@@ -126,33 +144,51 @@ public final class ClientGuard {
         // 5. quantise to whole mouse counts, carrying the leftover fraction.
         double countsXf = turnYaw / quantum + residualCountsX;
         double countsYf = turnPitch / quantum + residualCountsY;
-        long countsX = Math.round(countsXf);
-        long countsY = Math.round(countsYf);
-        residualCountsX = countsXf - countsX;
-        residualCountsY = countsYf - countsY;
+        planCountsX = Math.round(countsXf);
+        planCountsY = Math.round(countsYf);
+        residualCountsX = countsXf - planCountsX;
+        residualCountsY = countsYf - planCountsY;
+        appliedCountsX = 0;
+        appliedCountsY = 0;
+        planStartNanos = System.nanoTime();
 
-        double appliedYaw = countsX * quantum;
-        double appliedPitch = countsY * quantum;
+        lastYawTurnDeg = Math.abs(planCountsX * quantum);
+    }
 
-        // clamp pitch the way vanilla does before sending.
-        float curPitch = self.getPitch();
-        double clampedPitch = MathHelper.clamp(curPitch + appliedPitch, -90.0, 90.0);
-        double pitchCounts = countsY;
-        if (clampedPitch != curPitch + appliedPitch) {
-            pitchCounts = (clampedPitch - curPitch) / quantum;
-        }
+    /**
+     * Called every render frame: apply the fraction of this tick's rotation
+     * plan proportional to how far through the tick we are, so the camera
+     * moves smoothly at the framerate rather than in one lump per tick.
+     */
+    public void applyFrame(ClientPlayerEntity self) {
+        double p = clamp01((System.nanoTime() - planStartNanos) / TICK_NANOS);
+        step(self, Math.round(planCountsX * p), Math.round(planCountsY * p));
+    }
+
+    private void flushPlan(ClientPlayerEntity self) {
+        step(self, planCountsX, planCountsY);
+    }
+
+    private void step(ClientPlayerEntity self, long wantX, long wantY) {
+        long dx = wantX - appliedCountsX;
+        long dy = wantY - appliedCountsY;
+        if (dx == 0 && dy == 0) return;
+
+        // clamp pitch the way vanilla does, in counts.
+        double targetPitch = self.getPitch() + dy * quantum;
+        if (targetPitch > 90.0) dy = (long) ((90.0 - self.getPitch()) / quantum);
+        else if (targetPitch < -90.0) dy = (long) ((-90.0 - self.getPitch()) / quantum);
 
         self.lastYaw = self.getYaw();
         self.lastPitch = self.getPitch();
-        if (countsX != 0 || pitchCounts != 0) {
-            // changeLookDirection multiplies by 0.15 only; pre-scale by the
-            // sensitivity factor so total = counts * quantum.
-            self.changeLookDirection(countsX * sensFactor, pitchCounts * sensFactor);
-        }
+        // changeLookDirection multiplies by 0.15 only; pre-scale by the
+        // sensitivity factor so the total is counts * quantum.
+        self.changeLookDirection(dx * sensFactor, dy * sensFactor);
         self.setHeadYaw(self.getYaw());
         self.setBodyYaw(self.getYaw());
 
-        lastYawTurnDeg = Math.abs(appliedYaw);
+        appliedCountsX += dx;
+        appliedCountsY += dy;
     }
 
     /** Reset the mouse model after a respawn / teleport / pause. */
@@ -165,6 +201,10 @@ public final class ClientGuard {
         residualCountsY = 0.0;
         reactionBuf.clear();
         lastYawTurnDeg = 0.0;
+        planCountsX = 0;
+        planCountsY = 0;
+        appliedCountsX = 0;
+        appliedCountsY = 0;
     }
 
     /** No hit the same tick as a big turn (a classic aim-assist signature). */

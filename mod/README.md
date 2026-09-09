@@ -151,10 +151,13 @@ smoothed, chased by a modelled mouse velocity under an acceleration cap
 converted to a whole number of **mouse counts** through this client's exact
 vanilla sensitivity curve (`(s*0.6+0.2)³·8`, then `·0.15`; `s` read from
 your in-game setting or `mouse_sensitivity`) with the leftover fraction
-carried over, and applied through `changeLookDirection` - the same path a
-real mouse takes. So every rotation the server sees is an integer multiple
-of the mouse-count quantum with bounded velocity/acceleration and per-tick
-noise. On top of the real attack cooldown, `tryAttack` adds a jittered
+carried over. That per-tick plan is then applied **one render frame at a
+time** (via a per-frame hook, `changeLookDirection` - the real mouse path),
+proportional to how far through the tick we are, so the camera glides at the
+framerate instead of stepping 20×/s; the plan always lands in full before
+the tick's movement packet. So every rotation the server sees is an integer
+multiple of the mouse-count quantum with bounded velocity/acceleration and
+per-tick noise. On top of the real attack cooldown, `tryAttack` adds a jittered
 minimum click gap and a `max_cps` ceiling. Hit legality is unchanged (reach,
 a 14° facing cone, block line-of-sight, aim-settle). A buried kit item is
 hotkeyed into the hotbar via the player's own always-open (`syncId 0`)
@@ -241,9 +244,9 @@ This mod runs an actual vanilla client, so a lot of what `azalea_bot`'s
 `guard.rs` has to fake (physics, hunger cost, attack cooldown) is simply
 real here. [`ClientGuard`](src/client/java/rl/minecraft/ai/client/combat/ClientGuard.java)
 covers what a real client can still give away: rotation goes through a
-**virtual mouse** (reaction lag, low-pass, an acceleration + top-speed cap,
-tremor, then quantised to whole mouse counts on this client's real
-sensitivity curve and applied via `changeLookDirection`), clicks get a
+**virtual mouse** (low-pass, an acceleration + top-speed cap, tremor, then
+quantised to whole mouse counts on this client's real sensitivity curve and
+doled out per render frame via `changeLookDirection`), clicks get a
 jittered minimum gap and a `max_cps` ceiling on top of the real cooldown, an
 attack requires a clear line of sight and holds fire for one tick right
 after a big turn, and sneak can't be toggled faster than

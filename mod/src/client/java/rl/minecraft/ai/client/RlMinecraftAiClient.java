@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -49,6 +50,10 @@ public class RlMinecraftAiClient implements ClientModInitializer {
         // Drive input at the very start of the tick so the keybinding state we
         // set is picked up by vanilla's input polling this same tick.
         ClientTickEvents.START_CLIENT_TICK.register(controller::onClientTick);
+
+        // Per-frame: glide the aim rotation to the framerate (the per-tick
+        // plan is doled out here) so turns don't step 20x/s.
+        HudRenderCallback.EVENT.register((ctx, tickCounter) -> controller.onRenderFrame());
 
         // Small on-screen mode / kit / target / latency readout while fighting.
         if (config.hudEnabled) {

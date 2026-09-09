@@ -49,7 +49,7 @@ public final class FightController {
     private volatile Spec spec = Spec.DEFAULT;
     private InferenceClient inference;
     private EpisodeRecorder recorder;
-    private ClientGuard guard;
+    private volatile ClientGuard guard;
     private DeathWatch deathWatch;
     private Kit kit = Kit.SWORD;
     private boolean fightThroughDeath;
@@ -382,6 +382,19 @@ public final class FightController {
                     + "(training/python/export_model.py)"), false);
             }
         }
+    }
+
+    /**
+     * Called every render frame: hand the guard the current fraction of this
+     * tick so it can glide the rotation to the framerate instead of stepping
+     * once per tick. Cheap no-op when idle / paused / dead.
+     */
+    public void onRenderFrame() {
+        if (mode == Mode.IDLE || paused) return;
+        ClientGuard g = guard;
+        if (g == null) return;
+        ClientPlayerEntity self = MinecraftClient.getInstance().player;
+        if (self != null && self.isAlive()) g.applyFrame(self);
     }
 
     // ------------------------------------------------------------------ helpers

@@ -45,8 +45,8 @@ public final class ActionApplier {
         ClientPlayerEntity self = client.player;
         if (self == null) return false;
 
-        // --- look: drive the virtual mouse toward the policy's requested delta ---
-        guard.applyLook(self, Math.toDegrees(a.yawDelta()), Math.toDegrees(a.pitchDelta()));
+        // --- look: plan this tick's virtual-mouse turn (applied per-frame by the guard) ---
+        guard.planLook(self, Math.toDegrees(a.yawDelta()), Math.toDegrees(a.pitchDelta()));
 
         // --- movement keys ---
         boolean forward = a.moveZ() > MOVE_DEAD_ZONE;
