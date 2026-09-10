@@ -1,6 +1,7 @@
 package rl.minecraft.ai.client;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
@@ -46,6 +47,8 @@ public class RlMinecraftAiClient implements ClientModInitializer {
         this.controller = new FightController(config);
         LOGGER.info("rl-minecraft-ai ready - inference at {}, datasets in {}",
             config.inferenceUrl, config.datasetDir);
+
+        maybeInitDebugHarness(config);
 
         // Drive input at the very start of the tick so the keybinding state we
         // set is picked up by vanilla's input polling this same tick.
@@ -103,5 +106,26 @@ public class RlMinecraftAiClient implements ClientModInitializer {
                                 ctx.getSource()::sendFeedback);
                             return 1;
                         })))));
+    }
+
+    /**
+     * Wire up the dev-only debug harness ({@code /rldebug}, verbose per-tick
+     * logging, test-world creation, the scripted selftest). Its classes live in
+     * {@code rl.minecraft.ai.client.debug} and are stripped from every released
+     * jar (see {@code build.gradle}), so this is reflective and a no-op both in
+     * production and whenever the package is absent.
+     */
+    private void maybeInitDebugHarness(RlConfig config) {
+        if (!FabricLoader.getInstance().isDevelopmentEnvironment()) return;
+        try {
+            Class.forName("rl.minecraft.ai.client.debug.DebugHarness")
+                .getMethod("init", RlConfig.class, FightController.class)
+                .invoke(null, config, controller);
+            LOGGER.info("debug harness active (dev environment) - /rldebug");
+        } catch (ClassNotFoundException e) {
+            // released build: debug classes are not on the classpath - fine.
+        } catch (Throwable t) {
+            LOGGER.warn("debug harness failed to init", t);
+        }
     }
 }

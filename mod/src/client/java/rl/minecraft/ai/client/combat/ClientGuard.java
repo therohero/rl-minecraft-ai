@@ -7,6 +7,7 @@ import rl.minecraft.ai.client.RlConfig;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Random;
 
 /**
  * Per-fight "personal anticheat" between the policy's raw action and the real
@@ -73,6 +74,12 @@ public final class ClientGuard {
     private final Deque<double[]> reactionBuf = new ArrayDeque<>();
     /** Actual applied yaw turn last tick (deg) - feeds the aim-settle gate. */
     private double lastYawTurnDeg;
+    /** Raw yaw/pitch delta (deg) the policy requested last tick - debug telemetry. */
+    private double lastRawYawDeg;
+    private double lastRawPitchDeg;
+
+    /** Source of the sub-degree tremor. Seedable so a debug run can be deterministic. */
+    private final Random rng;
 
     // this tick's rotation plan, doled out per frame by applyFrame()
     private long planCountsX;
@@ -93,7 +100,13 @@ public final class ClientGuard {
     private long lastHotkeySwapTick = Long.MIN_VALUE / 2;
 
     public ClientGuard(RlConfig cfg, double mouseSensitivity) {
+        this(cfg, mouseSensitivity, System.nanoTime() ^ System.identityHashCode(cfg));
+    }
+
+    /** As above, with an explicit tremor seed (dev debug harness uses this for repeatable runs). */
+    public ClientGuard(RlConfig cfg, double mouseSensitivity, long tremorSeed) {
         this.cfg = cfg;
+        this.rng = new Random(tremorSeed);
         double s = MathHelper.clamp(mouseSensitivity, 0.0, 1.0);
         double d = s * 0.6 + 0.2;
         this.sensFactor = d * d * d * 8.0;
@@ -114,6 +127,8 @@ public final class ClientGuard {
      */
     public void planLook(ClientPlayerEntity self, double rawYawDeltaDeg, double rawPitchDeltaDeg) {
         flushPlan(self);
+        lastRawYawDeg = rawYawDeltaDeg;
+        lastRawPitchDeg = rawPitchDeltaDeg;
 
         // 1. reaction delay: act on the turn rate we wanted N ticks ago.
         reactionBuf.addLast(new double[] { rawYawDeltaDeg, rawPitchDeltaDeg });
@@ -212,6 +227,36 @@ public final class ClientGuard {
         return lastYawTurnDeg <= cfg.aimSettleDeg;
     }
 
+    // ---------------------------------------------------------- debug telemetry
+
+    /** Clicks in the trailing 1s window (live CPS). */
+    public double cps() {
+        long cutoff = System.nanoTime() - 1_000_000_000L;
+        int n = 0;
+        for (long t : clickTimes) if (t >= cutoff) n++;
+        return n;
+    }
+
+    /** Actual applied yaw turn last tick, degrees. */
+    public double lastYawTurnDeg() {
+        return lastYawTurnDeg;
+    }
+
+    /**
+     * Snapshot of the last {@link #planLook} pass for the debug log:
+     * {@code [rawYawDeg, rawPitchDeg, smoothedYawRate, smoothedPitchRate,
+     * mouseVelYaw, mouseVelPitch, planCountsX, planCountsY]}. Applied degrees
+     * this tick are {@code planCounts * rotationQuantumDeg()}.
+     */
+    public double[] lastPlan() {
+        return new double[] {
+            lastRawYawDeg, lastRawPitchDeg,
+            smoothedYawRate, smoothedPitchRate,
+            mouseVelYaw, mouseVelPitch,
+            planCountsX, planCountsY
+        };
+    }
+
     /**
      * Randomised click gate on top of the real attack cooldown: a jittered
      * minimum gap between clicks and a hard {@code max_cps} ceiling. Consumes
@@ -262,7 +307,7 @@ public final class ClientGuard {
     }
 
     /** One draw from an approx. standard normal (sum of 3 uniforms). */
-    private static double gaussian() {
-        return (Math.random() + Math.random() + Math.random() - 1.5) * 2.0;
+    private double gaussian() {
+        return (rng.nextDouble() + rng.nextDouble() + rng.nextDouble() - 1.5) * 2.0;
     }
 }

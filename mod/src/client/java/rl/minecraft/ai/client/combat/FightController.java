@@ -22,6 +22,7 @@ import rl.minecraft.ai.client.net.Spec;
 import rl.minecraft.ai.client.obs.ActionApplier;
 import rl.minecraft.ai.client.obs.ObservationBuilder;
 
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -69,6 +70,11 @@ public final class FightController {
 
     // pause state (GUI open / spectator)
     private boolean paused = false;
+    private volatile String pauseReasonLabel = null;
+
+    // Dev-only observation/action tap (see client/debug/DebugHarness). null in a
+    // released build - one volatile read + null check per active tick.
+    private volatile BiConsumer<JsonObject, Action> tickTap = null;
 
     // who last damaged us - the target while passive, and /fight target last
     private PlayerEntity lastAttacker;
@@ -110,6 +116,55 @@ public final class FightController {
     public int recordedTicks() {
         EpisodeRecorder r = recorder;
         return r == null ? -1 : r.ticks();
+    }
+
+    // ---- read-only introspection for the dev debug harness (client/debug) ----
+
+    /** Whether the tick loop is currently paused (GUI open / spectator). */
+    public boolean paused() {
+        return paused;
+    }
+
+    /** Why the loop is paused, or {@code null} when running. */
+    public String pauseReason() {
+        return pauseReasonLabel;
+    }
+
+    /** Client ticks since this session started. */
+    public long tick() {
+        return tick;
+    }
+
+    /** The live {@link ClientGuard} for this session, or {@code null} when idle. */
+    public ClientGuard guard() {
+        return guard;
+    }
+
+    /** Index of the episode currently being recorded, or -1 when not recording. */
+    public int episodeIndex() {
+        EpisodeRecorder r = recorder;
+        return r == null ? -1 : r.episodeIndex();
+    }
+
+    /** The current episode's running outcome verdict. */
+    public String outcome() {
+        return outcome;
+    }
+
+    /** File the recorder is currently writing, or {@code null} when not recording. */
+    public java.nio.file.Path currentEpisodeFile() {
+        EpisodeRecorder r = recorder;
+        return r == null ? null : r.file();
+    }
+
+    /**
+     * Install a per-active-tick tap of {@code (observation, action)} - the exact
+     * pair sent to / received from the inference server ({@code action} is
+     * {@code null} on a tick with no fresh reply). Dev debug harness only; pass
+     * {@code null} to remove.
+     */
+    public void setTickTap(BiConsumer<JsonObject, Action> tap) {
+        this.tickTap = tap;
     }
 
     // ------------------------------------------------------------------ commands
@@ -382,6 +437,9 @@ public final class FightController {
                     + "(training/python/export_model.py)"), false);
             }
         }
+
+        BiConsumer<JsonObject, Action> tap = tickTap;
+        if (tap != null) tap.accept(obs, action);
     }
 
     /**
@@ -418,12 +476,14 @@ public final class FightController {
             if (guard != null) guard.onRespawn();
             RlMinecraftAiClient.LOGGER.info("fight paused ({})", reason);
         }
+        pauseReasonLabel = reason;
         targetLabel = "paused: " + reason;
     }
 
     private void leavePause() {
         if (paused) {
             paused = false;
+            pauseReasonLabel = null;
             if (guard != null) guard.onRespawn();
             RlMinecraftAiClient.LOGGER.info("fight resumed");
         }
@@ -533,6 +593,7 @@ public final class FightController {
         prevHurtTime = 0;
         pendingRearm = false;
         paused = false;
+        pauseReasonLabel = null;
         lastAttacker = null;
         targetLabel = null;
         resetEpisodeOutcome();

@@ -69,3 +69,13 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   rotation-log dump to eyeball the delta distribution.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.
+- [ ] **Verify the debug-harness autorun selftest end to end.** The
+  `rl.minecraft.ai.client.debug` harness (`/rldebug`, verbose per-tick JSONL
+  log, test-world + dummy setup, scripted `SelfTest`; branch `mod-debug-harness`)
+  compiles, is stripped from every jar, and initialises + registers in
+  `runClient`. Still to confirm on a real display: `-Drl.minecraft.ai.debug.autorun=selftest`
+  actually joins the created test world and drives `SelfTest` to a
+  `selftest-<stamp>.json` with an exit code (last dev run stalled right after
+  test-world creation - no world join - on a headless-ish X display). Fix the
+  world-join wait in `DebugHarness` if it's a real ordering bug rather than the
+  display.

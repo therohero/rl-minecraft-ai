@@ -207,6 +207,47 @@ cd mod
 Drop the jar (plus Fabric API and Fabric Loader) into `mods/` for a normal
 install.
 
+## Debug harness (dev only)
+
+The `rl.minecraft.ai.client.debug` package is a self-test / instrumentation
+layer for iterating on the fight loop without a second player or a live
+server. It is compiled with the client so `./gradlew runClient` can use it,
+but **stripped from every jar** (`build.gradle` excludes the package from all
+`Jar` tasks and `verifyNoDebugClasses` fails the build if a class leaks) and
+only ever loaded reflectively behind `FabricLoader.isDevelopmentEnvironment()`
+- a released install has none of it on the classpath.
+
+### `/rldebug`
+
+| command | what it does |
+|---|---|
+| `/rldebug status` | one-line dump of `FightController` (mode / kit / target / pause / episode / tick), the `ClientGuard` (cps, rotation quantum, last turn, aim-settle), the inference client (seen / latency / last error), the debug log level and dummy count |
+| `/rldebug log off\|basic\|verbose` | per-tick JSONL log to `<game dir>/logs/rl-debug-<stamp>.jsonl`. `basic` = one record per active tick (mode, target, latency, applied `Action`, full guard snapshot: raw vs smoothed vs applied rotation); `verbose` also embeds the exact `obs` POSTed to `/act` |
+| `/rldebug world [setup]` | create vanilla's built-in test world (superflat, cheats) and apply a deterministic gamerule set (no daylight / weather / mob spawning, `keepInventory`, immediate respawn, survival) so runs repeat; `setup` re-applies the gamerules to the current world |
+| `/rldebug cmd <command>` | run one vanilla command with the integrated server's op-4 source (works regardless of player perms; falls back to sending as the player on a real server) |
+| `/rldebug script <name>` | run `<game dir>/rl-debug/<name>.txt` line by line (`#` comments allowed) |
+| `/rldebug kit <sword\|axe\|uhc>` | `/clear` + `/give` a loadout that `Kit.detect` classifies as that training kit |
+| `/rldebug dummy player [count] [dist]` | spawn client-side stand-in opponents (real to targeting / obs / aim, but the server doesn't know them - no damage / kills); `dummy mob [type] [dist]` summons a real `NoAI` mob for the damage / knockback paths; `dummy clear` removes them |
+| `/rldebug selftest` | run the scripted end-to-end check below against a fresh dummy |
+
+### Selftest
+
+`SelfTest` is the mod's answer to `smoke_train.py`: a tick-driven state
+machine that sets up the test world, equips the sword kit, spawns a dummy,
+runs `/fight train` against it for 200 ticks, then asserts on the observation
+stream (built every tick, no NaNs), the applied actions, the `ClientGuard`
+invariants (peak CPS within cap, every applied rotation an integer mouse-count
+multiple), aim convergence, and the dataset the recorder wrote (episode file
+with a trailing outcome record, manifest appended). It prints `PASS` / `FAIL`
+/ `SKIP` per assertion and writes `<game dir>/rl-debug/selftest-<stamp>.json`.
+The `inference_reachable` assertion is a `SKIP` (not a `FAIL`) when no
+inference server is up, so the harness is useful offline.
+
+Run it unattended with `-Drl.minecraft.ai.debug.autorun=selftest` (or
+`RL_DEBUG_AUTORUN=selftest`, plus `RL_DEBUG_LOG=verbose` for the tick log):
+the harness creates the world, runs the selftest and `halt()`s the client
+with exit code 0 (all pass) or 1. Needs a working display for `runClient`.
+
 Before `/fight`, the policy server has to be running. From the repo root
 (after training at least once with `./run.sh`):
 
