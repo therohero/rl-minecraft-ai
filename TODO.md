@@ -69,13 +69,12 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   rotation-log dump to eyeball the delta distribution.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.
-- [ ] **Verify the debug-harness autorun selftest end to end.** The
-  `rl.minecraft.ai.client.debug` harness (`/rldebug`, verbose per-tick JSONL
-  log, test-world + dummy setup, scripted `SelfTest`; branch `mod-debug-harness`)
-  compiles, is stripped from every jar, and initialises + registers in
-  `runClient`. Still to confirm on a real display: `-Drl.minecraft.ai.debug.autorun=selftest`
-  actually joins the created test world and drives `SelfTest` to a
-  `selftest-<stamp>.json` with an exit code (last dev run stalled right after
-  test-world creation - no world join - on a headless-ish X display). Fix the
-  world-join wait in `DebugHarness` if it's a real ordering bug rather than the
-  display.
+- [ ] **Extend the debug-harness selftest to cover the outcome path.** The
+  autorun selftest (`RL_DEBUG_AUTORUN=selftest ./gradlew runClient`) now runs
+  end to end - opens the test world, drives `SelfTest` against a mock
+  inference server, writes `run/rl-debug/selftest-*.json` with a pass/fail
+  exit code. Gaps it can't reach solo: a landed hit / real CPS and a
+  death-or-kill episode boundary both need a real second player (client-side
+  dummies have no server entity). Add a headless second `azalea` bot (or a
+  server-side fake player) so `cps_within_cap` and the win/loss outcome
+  assertions become real, then the `mod/` self-merge gate can rely on them.

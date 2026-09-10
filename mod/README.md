@@ -240,13 +240,25 @@ invariants (peak CPS within cap, every applied rotation an integer mouse-count
 multiple), aim convergence, and the dataset the recorder wrote (episode file
 with a trailing outcome record, manifest appended). It prints `PASS` / `FAIL`
 / `SKIP` per assertion and writes `<game dir>/rl-debug/selftest-<stamp>.json`.
-The `inference_reachable` assertion is a `SKIP` (not a `FAIL`) when no
-inference server is up, so the harness is useful offline.
+
+If the configured inference port is free the selftest starts a **mock
+inference server** (`MockInferenceServer`) for the run - a dumb stand-in
+policy (stand still, face the nearest enemy, hold attack) so the full
+observation → `POST /act` → action → `ClientGuard` path is exercised without
+exporting a checkpoint. If a real server is already up (`run_bot_mod.sh`) it
+uses that instead and the assertions run against the real policy's output.
 
 Run it unattended with `-Drl.minecraft.ai.debug.autorun=selftest` (or
 `RL_DEBUG_AUTORUN=selftest`, plus `RL_DEBUG_LOG=verbose` for the tick log):
-the harness creates the world, runs the selftest and `halt()`s the client
-with exit code 0 (all pass) or 1. Needs a working display for `runClient`.
+the harness opens vanilla's test-world screen, clicks *Create New World*,
+waits for the join, runs the selftest and `halt()`s the client with exit
+code 0 (all pass) or 1. Needs a working display for `runClient`.
+
+Known gaps (solo-only limits, not bugs): the dummy is a client-side entity
+the server can't see, so a hit never lands - `cps_within_cap` only checks the
+ceiling, not that clicks happened - and no death/kill occurs during the run,
+so the outcome-path assertions don't fire. A real second player or the Python
+inference server covers those.
 
 Before `/fight`, the policy server has to be running. From the repo root
 (after training at least once with `./run.sh`):

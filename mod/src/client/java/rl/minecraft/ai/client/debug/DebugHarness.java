@@ -26,8 +26,9 @@ import java.util.function.Consumer;
  *       {@code -Drl.minecraft.ai.debug.log}, default {@code off}),</li>
  *   <li>the {@code /rldebug} command tree ({@link DebugCommands}),</li>
  *   <li>the {@link SelfTest} state machine, and</li>
- *   <li>{@code -Drl.minecraft.ai.debug.autorun=selftest}: create the test
- *       world, run the selftest, write its result and close the client.</li>
+ *   <li>{@code -Drl.minecraft.ai.debug.autorun=selftest}: open vanilla's
+ *       test-world screen and click <i>Create New World</i>, wait for the
+ *       join, run the selftest, write its result and close the client.</li>
  * </ul>
  */
 public final class DebugHarness {
@@ -40,6 +41,7 @@ public final class DebugHarness {
 
     private static boolean autorunSelftest;
     private static boolean autorunWorldTriggered;
+    private static boolean autorunCreatePressed;
     private static boolean autorunJoined;
     private static boolean autorunTestLaunched;
     private static int lifeTicks;
@@ -103,6 +105,7 @@ public final class DebugHarness {
                     t.tick(mc);
                 } catch (Throwable e) {
                     RlMinecraftAiClient.LOGGER.warn("selftest tick error", e);
+                    t.abort();
                     activeTest = null;
                 }
             } else {
@@ -112,13 +115,17 @@ public final class DebugHarness {
 
         if (!autorunSelftest || autorunTestLaunched) return;
 
-        // 1. no world yet: create the vanilla test world once the title screen settles.
+        // 1. no world yet: open the vanilla test-world screen once the title
+        //    screen settles, then click its "Create New World" button for it.
         if (mc.world == null) {
             if (!autorunWorldTriggered && lifeTicks > 60 && mc.currentScreen instanceof TitleScreen) {
                 autorunWorldTriggered = true;
-                RlMinecraftAiClient.LOGGER.info("autorun: creating test world");
+                RlMinecraftAiClient.LOGGER.info("autorun: opening test-world screen");
                 TestWorld.createOrLoad(mc, m ->
                     RlMinecraftAiClient.LOGGER.info("[autorun] {}", m.getString()));
+            }
+            if (autorunWorldTriggered && !autorunCreatePressed && TestWorld.pressCreateButton(mc)) {
+                autorunCreatePressed = true;
             }
             return;
         }

@@ -1,8 +1,12 @@
 package rl.minecraft.ai.client.debug;
 
+import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.gui.screen.world.CreateWorldScreen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.ClickableWidget;
+import net.minecraft.client.input.MouseInput;
 import net.minecraft.text.Text;
 
 import rl.minecraft.ai.client.RlMinecraftAiClient;
@@ -60,6 +64,28 @@ public final class TestWorld {
                     + ") - create one by hand and run /rldebug world setup"));
             }
         });
+    }
+
+    /**
+     * {@link CreateWorldScreen#showTestWorld} only opens the create-world GUI;
+     * a human still has to click "Create New World". For the unattended autorun
+     * we press that button ourselves. Returns {@code true} once the click has
+     * been dispatched (the screen is the test-world {@link CreateWorldScreen}
+     * and its create button was found), {@code false} while we're not there yet.
+     */
+    public static boolean pressCreateButton(MinecraftClient mc) {
+        if (!(mc.currentScreen instanceof CreateWorldScreen screen)) return false;
+        String want = Text.translatable("selectWorld.create").getString();
+        for (ClickableWidget w : Screens.getButtons(screen)) {
+            if (w instanceof ButtonWidget b && b.getMessage() != null
+                    && want.equals(b.getMessage().getString())) {
+                if (!b.active) return false;   // world data still loading
+                b.onPress(new MouseInput(0, 0));
+                RlMinecraftAiClient.LOGGER.info("autorun: pressed '{}'", want);
+                return true;
+            }
+        }
+        return false;
     }
 
     /** (Re)apply the deterministic gamerule set to the world we're in. */

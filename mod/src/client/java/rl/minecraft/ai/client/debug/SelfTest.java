@@ -54,6 +54,8 @@ public final class SelfTest {
     private final Consumer<Text> chat;
     private final boolean autorun;
 
+    private MockInferenceServer mock;
+
     private Phase phase = Phase.SETUP;
     private int phaseTicks = 0;
     private int runTicks = 0;
@@ -84,6 +86,15 @@ public final class SelfTest {
 
     public boolean finished() {
         return finished;
+    }
+
+    /** Release resources if the run is torn down early (e.g. a tick error). */
+    public void abort() {
+        if (mock != null) {
+            mock.stop();
+            mock = null;
+        }
+        finished = true;
     }
 
     /** Forwarded from the tick tap while the test is in its RUN phase. */
@@ -118,6 +129,10 @@ public final class SelfTest {
                 if (phaseTicks == 1) {
                     say("§7selftest: applying world setup");
                     TestWorld.applySetup(mc, chat);
+                    mock = MockInferenceServer.startIfFree(cfg);
+                    say(mock != null
+                        ? "§7selftest: mock inference server started on " + cfg.inferenceUrl
+                        : "§7selftest: using the inference server already at " + cfg.inferenceUrl);
                 }
                 if (phaseTicks >= 20) advance(Phase.EQUIP);
             }
@@ -135,7 +150,7 @@ public final class SelfTest {
             case ENGAGE -> {
                 if (phaseTicks == 1) {
                     say("§7selftest: spawning dummy + starting /fight train");
-                    Dummy.spawnPlayers(mc, 1, 4.0, chat);
+                    Dummy.spawnPlayers(mc, 1, 3.0, chat);   // ~4m ahead, stationary aim target
                 }
                 if (phaseTicks == 5) {
                     dummyId = firstDummyId(mc);
@@ -169,6 +184,10 @@ public final class SelfTest {
             }
             case DONE -> {
                 Dummy.clear(mc, chat);
+                if (mock != null) {
+                    mock.stop();
+                    mock = null;
+                }
                 finished = true;
                 if (autorun) {
                     boolean pass = allPassed();

@@ -3,6 +3,8 @@ package rl.minecraft.ai.client.debug;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.command.ServerCommandSource;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 
 import rl.minecraft.ai.client.RlMinecraftAiClient;
@@ -12,11 +14,11 @@ import java.util.function.Consumer;
 
 /**
  * Runs vanilla commands from the debug harness. On an integrated (singleplayer)
- * server the command is executed on the server thread with the server's own
- * op-level-4 {@code ServerCommandSource}, so {@code /gamerule}, {@code /summon},
- * {@code /give}, {@code /tp} etc. all work regardless of the player's own perms.
- * On a real server it falls back to sending the command as the player (subject
- * to that server's permissions).
+ * server the command is executed on the server thread against a full-permission
+ * {@code ServerCommandSource} that carries the player's entity, position and
+ * world - so {@code /gamerule}, {@code /summon}, {@code /give @s}, {@code /tp}
+ * etc. all work and self-selectors resolve. On a real server it falls back to
+ * sending the command as the player (subject to that server's permissions).
  */
 public final class ServerCmd {
     private ServerCmd() {}
@@ -28,9 +30,18 @@ public final class ServerCmd {
 
         MinecraftServer server = mc.getServer();
         if (server != null) {
+            java.util.UUID uuid = mc.player == null ? null : mc.player.getUuid();
             server.execute(() -> {
                 try {
-                    server.getCommandManager().parseAndExecute(server.getCommandSource(), cmd);
+                    // Console source == full permissions; graft on the player so @s and
+                    // relative coords resolve. withSilent() keeps a locked / rejected
+                    // gamerule from spamming chat (the test world locks a few).
+                    ServerCommandSource src = server.getCommandSource().withSilent();
+                    ServerPlayerEntity sp = uuid == null ? null : server.getPlayerManager().getPlayer(uuid);
+                    if (sp != null) {
+                        src = src.withEntity(sp).withPosition(sp.getEntityPos()).withWorld(sp.getEntityWorld());
+                    }
+                    server.getCommandManager().parseAndExecute(src, cmd);
                 } catch (Exception e) {
                     RlMinecraftAiClient.LOGGER.warn("debug cmd failed: /{} - {}", cmd, e.toString());
                     if (fb != null) fb.accept(Text.literal("§ccmd failed: " + e.getMessage()));
