@@ -21,6 +21,7 @@ stops it after saving `training/checkpoints/latest.pt`):
 ```bash
 ./run.sh                 # bash (Linux/macOS/WSL/Git Bash)
 .\run.ps1                # native Windows PowerShell
+./run_docker.sh          # in a container (Docker or Podman, GPU; see below)
 ```
 
 **2. Serve the trained model**, then play the bot one of two ways:
@@ -72,6 +73,81 @@ server still pick the actual compute device at runtime (`--device auto` by
 default - CUDA/ROCm, Apple MPS, Intel XPU, DirectML, else CPU; see
 `training/python/device.py`); for a non-NVIDIA accelerator install the
 matching wheel yourself per `training/python/requirements.txt`.
+
+## Docker / Podman (GPU training)
+
+Training also runs in a container, with no local Rust, Python or `.venv/`
+needed. `run_docker.sh` works with either engine and picks the right flags
+for the one it finds:
+
+```bash
+./run_docker.sh                     # == ./run.sh, in a container
+./run_docker.sh --num-arenas 512    # args are forwarded to train.py
+RL_DOCKER_GPU=0 ./run_docker.sh     # CPU-only (no GPU flags at all)
+```
+
+`training/checkpoints/` is bind-mounted, so `latest.pt`, the numbered
+snapshots, `league/` and `metrics.csv` land on the host exactly as they do
+with `./run.sh` - a later `./run_bot_mod.sh` exports and serves them without
+caring that the training ran in a container. Stopping is the same too:
+Ctrl+C (or `docker stop`, via `STOPSIGNAL SIGINT`) lets train.py save
+`latest.pt` before it exits.
+
+Only the **training** half of the repo is containerised. `azalea-bot/` and
+`mod/` talk to a real Minecraft server and a real game client, so they stay
+on the host.
+
+### Podman notes
+
+Rootless Podman differs from Docker in two ways that `run_docker.sh` handles
+for you, worth knowing if you run the container by hand:
+
+- **The GPU goes through CDI, not `--gpus`.** Podman has no `--gpus` flag;
+  it wants a spec file from the NVIDIA Container Toolkit. One-time setup:
+
+  ```bash
+  sudo nvidia-ctk cdi generate --mode=wsl --output=/etc/cdi/nvidia.yaml   # drop --mode=wsl off WSL2
+  podman run --rm --device nvidia.com/gpu=all \
+      docker.io/nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi            # verify
+  ```
+
+  Without a spec under `/etc/cdi` or `/var/run/cdi`, `run_docker.sh` says so
+  and stops rather than silently training on the CPU.
+- **`--userns=keep-id` on the bind mount.** The image runs as uid 1000;
+  rootless Podman would otherwise map that to a *subuid* (100999-ish) and
+  leave you with checkpoints your own account can't write or delete.
+
+`compose.yaml` is the Docker path specifically - its GPU reservation needs
+**Compose v2**. The `docker-compose` 1.29.2 that Debian/Ubuntu package
+silently ignores `deploy.resources`, so use `run_docker.sh` there.
+
+### How the image differs from `run.sh`
+
+- **`ensure_deps.py` is bypassed.** It picks a `torch` wheel from the
+  hardware it sees at *runtime*, which is the wrong question when building
+  an image. The [`Dockerfile`](Dockerfile) pins the backend instead -
+  `cu128` (torch >= 2.7, the first build with Blackwell/sm_120 kernels).
+  For an older card or a different CUDA, override at build time:
+
+  ```bash
+  podman build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 -t rl-minecraft-ai-train .
+  ```
+
+  That torch install is most of the image's ~7.5 GB; `.../whl/cpu` brings it
+  down to well under 1 GB, though `./run.sh` is the simpler path if you
+  aren't using the GPU anyway.
+- **The CUDA base image is the `-base` tag, not `-runtime`,** and its
+  bundled CUDA apt source is deleted. The torch wheel carries its own
+  CUDA/cuDNN userspace, so the container only needs the driver, which the
+  toolkit injects - and nothing is installed from NVIDIA's apt repo, which
+  otherwise breaks every build whenever that mirror is mid-sync.
+- **Base images are fully qualified** (`docker.io/library/rust:...`). Docker
+  infers the registry; Podman refuses to guess unless the host's
+  `registries.conf` says so.
+
+`--num-arenas` defaults are container-aware already: the auto-detection
+reads `sched_getaffinity`, so a `--cpus`-limited container sizes itself to
+what it was actually given rather than to the host's core count.
 
 ## Architecture
 
