@@ -57,9 +57,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 - [ ] **`torch.export` migration.** `export_model.py` uses TorchScript because
   its on-disk format is stable across torch versions; revisit `.pt2` once it
   makes the same cross-version guarantee.
-- [ ] **Reproducible env.** A Dockerfile / devcontainer pinning Rust + Python
-  + torch so a fresh machine is one command.
-
 ## Mod (`mod/`)
 
 - [ ] **Tune the mod virtual-mouse against a real anticheat.** `ClientGuard`'s

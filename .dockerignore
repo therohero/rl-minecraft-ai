@@ -1,0 +1,19 @@
+# The build context only needs training/sim (stage 1) and training/python
+# (stage 2). Everything else is either huge or irrelevant to the image.
+.git
+.github
+.venv
+**/target
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.log
+
+# Not containerised: these need a real Minecraft client/server.
+azalea-bot
+mod
+
+# Bind-mounted at runtime, never baked in.
+training/checkpoints
+training/datasets
+rl-datasets
