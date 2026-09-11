@@ -1,25 +1,33 @@
-# GPU self-play training in a container. See Dockerfile and README.md's
+# Self-play training in a container. See Dockerfile and README.md's
 # "Docker (GPU training)" section.
 #
-#   docker compose run --rm --build train             # train with defaults
+#   docker compose run --rm --build train             # GPU, defaults
+#   docker compose run --rm --build train-cpu         # CPU, defaults
 #   docker compose run --rm train --num-arenas 512    # args -> train.py
 #
+# `train-cpu` is a separate target (Dockerfile's `runtime-cpu` stage), not a
+# fallback picked for you - see the Dockerfile header for when it actually
+# wins over the GPU.
+x-train-common: &train-common
+  # tini as PID 1: forwards the stop signal to train.py and reaps the
+  # mc_pvp_sim subprocess.
+  init: true
+  # Checkpoints (latest.pt, numbered snapshots, league/, metrics.csv) land
+  # on the host, so a container restart resumes and ./run_bot_mod.sh can
+  # export the result as usual.
+  volumes:
+    - ./training/checkpoints:/app/training/checkpoints
+  # Room for the checkpoint + league snapshot write that SIGINT triggers.
+  stop_grace_period: 60s
+
 services:
   train:
+    <<: *train-common
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     image: rl-minecraft-ai-train
-    # tini as PID 1: forwards the stop signal to train.py and reaps the
-    # mc_pvp_sim subprocess.
-    init: true
-    # Checkpoints (latest.pt, numbered snapshots, league/, metrics.csv) land
-    # on the host, so a container restart resumes and ./run_bot_mod.sh can
-    # export the result as usual.
-    volumes:
-      - ./training/checkpoints:/app/training/checkpoints
-    # Room for the checkpoint + league snapshot write that SIGINT triggers.
-    stop_grace_period: 60s
     deploy:
       resources:
         reservations:
@@ -27,3 +35,11 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  train-cpu:
+    <<: *train-common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-cpu
+    image: rl-minecraft-ai-train-cpu
