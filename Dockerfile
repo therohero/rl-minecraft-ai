@@ -1,19 +1,37 @@
 # syntax=docker/dockerfile:1
 #
-# GPU training image: builds the Rust sim, installs a CUDA torch, and runs
-# `train.py` as the entrypoint. Only the training half of the repo is in
-# here - `azalea-bot/` and `mod/` need a real Minecraft server / client and
-# are not containerised.
+# Training image: builds the Rust sim, then runs `train.py` as the
+# entrypoint. Only the training half of the repo is in here -
+# `azalea-bot/` and `mod/` need a real Minecraft server / client and are
+# not containerised.
 #
-#   docker compose run --rm --build train              # train with defaults
-#   docker compose run --rm train --num-arenas 512     # extra args -> train.py
+# Two final stages, built from the same sim binary - pick one with
+# `--target`, it is not a GPU-with-CPU-fallback:
+#
+#   `runtime`     (default target) - CUDA torch. The PPO update is one big
+#                 batched matmul per step and wants the GPU.
+#   `runtime-cpu` - CPU-only torch, ~1/10th the image size. Rollout
+#                 collection is many *small* forward passes (one per sim
+#                 step) - see train.py's --torch-threads/--update-threads
+#                 help text - so it's latency-, not throughput-bound, and a
+#                 few CPU threads can beat a GPU's per-call launch overhead
+#                 there. Also the only option without an NVIDIA GPU at all.
+#
+#   docker compose run --rm --build train              # GPU, defaults
+#   docker compose run --rm --build train-cpu           # CPU, defaults
+#   docker compose run --rm train --num-arenas 512      # extra args -> train.py
 #
 # or without compose:
 #
-#   docker build -t rl-minecraft-ai-train .
+#   docker build --target runtime -t rl-minecraft-ai-train .
 #   docker run --rm -it --gpus all --init \
 #       -v "$PWD/training/checkpoints:/app/training/checkpoints" \
 #       rl-minecraft-ai-train
+#
+#   docker build --target runtime-cpu -t rl-minecraft-ai-train-cpu .
+#   docker run --rm -it --init \
+#       -v "$PWD/training/checkpoints:/app/training/checkpoints" \
+#       rl-minecraft-ai-train-cpu
 #
 # See README.md's "Docker (GPU training)" section.
 
@@ -50,7 +68,56 @@ COPY training/sim/src ./src
 RUN cargo build --release --locked
 
 # ---------------------------------------------------------------------------
-# stage 2 - runtime
+# stage 2 - runtime-cpu
+# ---------------------------------------------------------------------------
+# Deliberately its own stage rather than the `runtime` one with the CUDA
+# base swapped out via an ARG - the base image family (Ubuntu+CUDA-apt vs
+# plain Debian) and the torch wheel index both change, and keeping them as
+# two straight-line stages is easier to read than threading conditionals
+# through one. The two duplicate a handful of RUN steps; that's the
+# trade-off made for it.
+FROM docker.io/library/python:3.11-slim-bookworm AS runtime-cpu
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Same venv-over-system-install reasoning as the GPU stage - keeps the
+# layout close to the repo-local `.venv/` run.sh builds, and python:slim's
+# base install is externally-managed (PEP 668) too.
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN python3 -m venv "$VIRTUAL_ENV" && pip install --upgrade pip
+
+# The slim CPU-only wheel (~200 MB) instead of the ~3.5 GB default that
+# bundles CUDA/cuDNN/NCCL for a GPU this stage never uses - the same pick
+# ensure_deps.py makes for a bare-metal run.sh on a machine with no GPU.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG TORCH_SPEC="torch>=2.1"
+RUN pip install --index-url "${TORCH_INDEX_URL}" "${TORCH_SPEC}" \
+ && pip install "numpy>=1.24" "pytest>=8.0"
+
+# python:3.11-slim-bookworm has no uid-1000 account to clear first, unlike
+# the CUDA/Ubuntu base above.
+RUN useradd --create-home --uid 1000 --shell /bin/bash trainer
+
+COPY --from=sim-build /build/target/release/mc_pvp_sim /usr/local/bin/mc_pvp_sim
+COPY training/python /app/training/python
+RUN mkdir -p /app/training/checkpoints && chown -R trainer:trainer /app
+
+USER trainer
+WORKDIR /app/training/python
+
+STOPSIGNAL SIGINT
+
+ENTRYPOINT ["python3", "train.py", "--sim-binary", "/usr/local/bin/mc_pvp_sim"]
+
+# ---------------------------------------------------------------------------
+# stage 3 - runtime (GPU, the default `docker build` target)
 # ---------------------------------------------------------------------------
 FROM ${CUDA_IMAGE} AS runtime
 
@@ -116,3 +183,4 @@ STOPSIGNAL SIGINT
 # which is the bind-mount point. Anything passed after the image name is
 # forwarded to train.py.
 ENTRYPOINT ["python3", "train.py", "--sim-binary", "/usr/local/bin/mc_pvp_sim"]
+

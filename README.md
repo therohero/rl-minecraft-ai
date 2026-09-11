@@ -74,17 +74,28 @@ default - CUDA/ROCm, Apple MPS, Intel XPU, DirectML, else CPU; see
 `training/python/device.py`); for a non-NVIDIA accelerator install the
 matching wheel yourself per `training/python/requirements.txt`.
 
-## Docker / Podman (GPU training)
+## Docker / Podman
 
 Training also runs in a container, with no local Rust, Python or `.venv/`
 needed. `run_docker.sh` works with either engine and picks the right flags
-for the one it finds:
+for the one it finds. It builds one of two Dockerfile targets - pick
+explicitly, it's not a GPU-with-CPU-fallback:
 
 ```bash
-./run_docker.sh                     # == ./run.sh, in a container
-./run_docker.sh --num-arenas 512    # args are forwarded to train.py
-RL_DOCKER_GPU=0 ./run_docker.sh     # CPU-only (no GPU flags at all)
+./run_docker.sh                        # == ./run.sh, in a container - GPU target
+./run_docker.sh --num-arenas 512       # args are forwarded to train.py
+RL_DOCKER_TARGET=cpu ./run_docker.sh   # the CPU target instead
 ```
+
+The **CPU target isn't just "no GPU available"** - the PPO update (one big
+batched matmul per step) wants a GPU, but rollout collection is many small
+forward passes, one per sim step, so it's latency- rather than throughput-
+bound (same reasoning as `--torch-threads`/`--update-threads` in
+`train.py --help`); a few CPU threads can beat a GPU's per-call launch
+overhead there. It's also a much smaller image (~1 GB vs ~7.5 GB, no CUDA
+userspace, plain `python:slim` base instead of an NVIDIA one) if you don't
+have a GPU at all. `docker compose`'s equivalent is the `train-cpu` service
+(`docker compose run --rm --build train-cpu`) alongside `train`.
 
 `training/checkpoints/` is bind-mounted, so `latest.pt`, the numbered
 snapshots, `league/` and `metrics.csv` land on the host exactly as they do
@@ -125,17 +136,17 @@ silently ignores `deploy.resources`, so use `run_docker.sh` there.
 
 - **`ensure_deps.py` is bypassed.** It picks a `torch` wheel from the
   hardware it sees at *runtime*, which is the wrong question when building
-  an image. The [`Dockerfile`](Dockerfile) pins the backend instead -
-  `cu128` (torch >= 2.7, the first build with Blackwell/sm_120 kernels).
-  For an older card or a different CUDA, override at build time:
+  an image. The [`Dockerfile`](Dockerfile)'s two targets pin a backend each
+  instead: the GPU `runtime` target installs `cu128` (torch >= 2.7, the
+  first build with Blackwell/sm_120 kernels) - override for an older card or
+  a different CUDA with `--build-arg TORCH_INDEX_URL=...`:
 
   ```bash
-  podman build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 -t rl-minecraft-ai-train .
+  podman build --target runtime --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 -t rl-minecraft-ai-train .
   ```
 
-  That torch install is most of the image's ~7.5 GB; `.../whl/cpu` brings it
-  down to well under 1 GB, though `./run.sh` is the simpler path if you
-  aren't using the GPU anyway.
+  The CPU `runtime-cpu` target installs the plain `.../whl/cpu` wheel the
+  same way `ensure_deps.py` would on a GPU-less machine.
 - **The CUDA base image is the `-base` tag, not `-runtime`,** and its
   bundled CUDA apt source is deleted. The torch wheel carries its own
   CUDA/cuDNN userspace, so the container only needs the driver, which the

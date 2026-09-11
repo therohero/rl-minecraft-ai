@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Same job as ./run.sh, but inside a container: builds the image (Rust sim +
-# CUDA torch, see Dockerfile) if needed, then runs self-play training on the
-# GPU. Ctrl+C stops it after train.py saves `latest.pt`. Any arguments are
-# forwarded straight to train.py, e.g.:
+# Same job as ./run.sh, but inside a container: builds the image (see
+# Dockerfile) if needed, then runs self-play training in it. Ctrl+C stops it
+# after train.py saves `latest.pt`. Any arguments are forwarded straight to
+# train.py, e.g.:
 #
-#   ./run_docker.sh                        # train with defaults
+#   ./run_docker.sh                        # train with defaults (GPU target)
 #   ./run_docker.sh --num-arenas 512       # override the arena count
-#   ./run_docker.sh --device cpu           # ignore the GPU
+#   RL_DOCKER_TARGET=cpu ./run_docker.sh   # the runtime-cpu target instead
 #
 # Checkpoints are bind-mounted, so they show up in training/checkpoints/ on
 # the host exactly as with ./run.sh - ./run_bot_mod.sh then exports and
@@ -18,16 +18,38 @@
 #
 # Env knobs:
 #   RL_DOCKER_ENGINE=docker|podman   skip engine autodetection
-#   RL_DOCKER_GPU=0                  run CPU-only (no GPU flags at all)
-#   RL_DOCKER_IMAGE=<name>           image tag to build/run
+#   RL_DOCKER_TARGET=gpu|cpu         which Dockerfile stage to build/run
+#                                    (default gpu) - see the Dockerfile
+#                                    header for when CPU actually wins;
+#                                    it's a distinct target, not a
+#                                    fallback picked for you
+#   RL_DOCKER_GPU=0                  within the gpu target, run without
+#                                    --gpus/CDI (the image still carries
+#                                    CUDA torch) - ignored for RL_DOCKER_TARGET=cpu
+#   RL_DOCKER_IMAGE=<name>           image tag to build/run (default
+#                                    rl-minecraft-ai-train[-cpu])
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${RL_DOCKER_IMAGE:-rl-minecraft-ai-train}"
 
 log() { printf '[run_docker.sh] %s\n' "$*"; }
 die() { printf '[run_docker.sh] ERROR: %s\n' "$*" >&2; exit 1; }
+
+TARGET="${RL_DOCKER_TARGET:-gpu}"
+case "$TARGET" in
+    gpu) DOCKERFILE_TARGET=runtime ;;
+    cpu) DOCKERFILE_TARGET=runtime-cpu ;;
+    *) die "RL_DOCKER_TARGET must be 'gpu' or 'cpu' (got '$TARGET')" ;;
+esac
+if [ -n "${RL_DOCKER_IMAGE:-}" ]; then
+    IMAGE="$RL_DOCKER_IMAGE"
+elif [ "$TARGET" = "cpu" ]; then
+    IMAGE="rl-minecraft-ai-train-cpu"
+else
+    IMAGE="rl-minecraft-ai-train"
+fi
+log "target: $TARGET (Dockerfile stage '$DOCKERFILE_TARGET'), image: $IMAGE"
 
 # --- which engine -----------------------------------------------------------
 # `docker` may be the podman-docker shim rather than Docker proper, and the
@@ -54,10 +76,14 @@ log "using $ENGINE ($("$ENGINE" --version 2>/dev/null | tail -1))"
 
 # --- GPU --------------------------------------------------------------------
 # Docker takes --gpus; rootless Podman goes through CDI instead, which needs
-# nvidia-container-toolkit to have written a spec (see README).
+# nvidia-container-toolkit to have written a spec (see README). None of this
+# applies to the cpu target - it's a plain CPU-only image, nothing to pass
+# through.
 GPU_ARGS=()
-if [ "${RL_DOCKER_GPU:-1}" = "0" ]; then
-    log "RL_DOCKER_GPU=0 - running CPU-only"
+if [ "$TARGET" = "cpu" ]; then
+    :
+elif [ "${RL_DOCKER_GPU:-1}" = "0" ]; then
+    log "RL_DOCKER_GPU=0 - running the gpu-target image without GPU access"
 elif [ "$ENGINE" = "docker" ]; then
     GPU_ARGS=(--gpus all)
 elif compgen -G "/etc/cdi/*.yaml" >/dev/null 2>&1 || compgen -G "/etc/cdi/*.json" >/dev/null 2>&1 \
@@ -75,7 +101,7 @@ else
 
   On a native Linux host drop `--mode=wsl`. To train on the CPU meanwhile:
 
-    RL_DOCKER_GPU=0 ./run_docker.sh
+    RL_DOCKER_TARGET=cpu ./run_docker.sh
 MSG
     exit 1
 fi
@@ -101,8 +127,12 @@ mkdir -p "$SCRIPT_DIR/training/checkpoints"
 TTY_ARGS=()
 [ -t 0 ] && [ -t 1 ] && TTY_ARGS=(-it)
 
-log "building image (first run pulls CUDA torch - a few GB - and compiles the sim)..."
-"$ENGINE" build -t "$IMAGE" "$SCRIPT_DIR" || die "image build failed - see errors above"
+if [ "$TARGET" = "cpu" ]; then
+    log "building image (first run pulls CPU torch - ~200 MB - and compiles the sim)..."
+else
+    log "building image (first run pulls CUDA torch - a few GB - and compiles the sim)..."
+fi
+"$ENGINE" build --target "$DOCKERFILE_TARGET" -t "$IMAGE" "$SCRIPT_DIR" || die "image build failed - see errors above"
 
 log "starting training in a container (Ctrl+C to stop; checkpoints -> training/checkpoints/)..."
 exec "$ENGINE" run --rm --init \
