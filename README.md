@@ -308,9 +308,12 @@ BPTT. The rollout loop carries the hidden state per slot and zeroes it the
 tick a match ends (like the frame stacker's history clear); the PPO update
 (`_ppo_update_recurrent`) replays each slot's rollout as a sequence, one
 minibatch = a batch of whole slot-sequences. `evaluate.py` carries hidden
-state per player. The MLP stays the default. The live inference bridges
-keep no recurrent state between ticks yet, so `export_model.py` refuses an
-`--lstm` checkpoint - train the deployable policy without it.
+state per player. The MLP stays the default. `export_model.py` exports an
+`--lstm` checkpoint too - both live bridges (`azalea-bot`, `mod`) carry the
+recurrent `(h, c)` state between ticks as an `lstm_state` field on the
+`/act` request/response, zeroed at each episode boundary (see
+`azalea-bot/README.md`'s "Recurrent (`--lstm`) checkpoints" section for the
+wire contract).
 
 ### Terrain curriculum
 

@@ -21,8 +21,9 @@ then asserts on the run's own log output + the files it left behind:
   6. a `--terrain-curriculum-updates` run ramps the terrain amplitude up
      via mid-run sim relaunches and completes;
   7. an `--lstm` (recurrent head) run trains, resumes, and evaluates; a head
-     mismatch on resume is rejected and `export_model.py` refuses the
-     recurrent checkpoint for live play.
+     mismatch on resume is rejected, and `export_model.py` exports the
+     recurrent checkpoint for live play (see tests/test_inference_server.py
+     for the `/act` `lstm_state` wire contract that export feeds).
 
 Exit code 0 = the training loop is healthy. Non-zero prints what failed.
 
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import shutil
@@ -264,9 +266,19 @@ def main() -> int:
 
         _run_eval(sim_binary, lstm_ckpt)
         ls_exp = _run_export(os.path.join(lstm_ckpt, "latest.pt"))
-        _require(ls_exp.returncode != 0 and "lstm" in (ls_exp.stdout + ls_exp.stderr).lower(),
-                 "export_model.py should refuse a recurrent checkpoint", ls_exp.stdout + ls_exp.stderr)
-        print("      ok: LSTM head trains, resumes, evaluates; head mismatch + live export refused")
+        _require(ls_exp.returncode == 0,
+                 "export_model.py should export a recurrent checkpoint for live play",
+                 ls_exp.stdout + ls_exp.stderr)
+        ls_spec_path = os.path.join(lstm_ckpt, "model", "spec.json")
+        with open(ls_spec_path) as f:
+            ls_spec = json.load(f)
+        _require(ls_spec["arch"]["lstm_hidden"] == 16,
+                 f"exported spec.json has the wrong lstm_hidden: {ls_spec['arch']}", ls_exp.stdout)
+        _require("lstm_h" in ls_spec["policy_outputs"] and "lstm_c" in ls_spec["policy_outputs"],
+                 f"exported spec.json policy_outputs missing lstm_h/lstm_c: {ls_spec['policy_outputs']}",
+                 ls_exp.stdout)
+        print("      ok: LSTM head trains, resumes, evaluates; head mismatch rejected, live export "
+              "succeeds (see tests/test_inference_server.py for the /act round-trip)")
 
         print("\nSMOKE OK - training loop is healthy")
         return 0

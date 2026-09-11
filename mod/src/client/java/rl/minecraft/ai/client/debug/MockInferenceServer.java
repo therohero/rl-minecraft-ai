@@ -26,6 +26,16 @@ import java.nio.charset.StandardCharsets;
  * converges - {@code aim_converges} - and every action field is exercised). If
  * the configured inference port is already taken - a real server is up -
  * {@link #startIfFree} returns {@code null} and the selftest uses that instead.
+ *
+ * <p>It also always echoes an {@code lstm_state} in its {@code /act} reply -
+ * {@code {"h": [n+1], "c": [0]}} where {@code n} is the incoming request's
+ * {@code lstm_state.h[0]} (0 if absent) - so {@link SelfTest}'s
+ * {@code lstm_state_carried} assertion can exercise {@link
+ * rl.minecraft.ai.client.net.InferenceClient}'s carry-the-state-between-ticks
+ * wiring without a real {@code --lstm} checkpoint. This is independent of
+ * whatever real checkpoint's {@code spec.json} says (this mock never serves
+ * one) - the client carries whatever comes back regardless, so exercising it
+ * this way is faithful to the real contract.
  */
 final class MockInferenceServer {
     private static final Gson GSON = new Gson();
@@ -93,7 +103,28 @@ final class MockInferenceServer {
         a.addProperty("use_item", false);
         a.addProperty("sneak", false);
         a.addProperty("held_slot", 0);
+        a.add("lstm_state", nextLstmState(obs));
         reply(ex, GSON.toJson(a));
+    }
+
+    /** `{"h": [n+1], "c": [0]}` where `n` is the incoming `lstm_state.h[0]`
+     *  (0 if absent/malformed) - see the class doc comment. */
+    private JsonObject nextLstmState(JsonObject obs) {
+        int n = 0;
+        try {
+            JsonObject in = obs.getAsJsonObject("lstm_state");
+            if (in != null) n = in.getAsJsonArray("h").get(0).getAsInt();
+        } catch (RuntimeException ignored) {
+            // absent on the first call of an episode, or malformed - starts from 0 either way
+        }
+        JsonObject state = new JsonObject();
+        JsonArray h = new JsonArray();
+        h.add(n + 1);
+        JsonArray c = new JsonArray();
+        c.add(0);
+        state.add("h", h);
+        state.add("c", c);
+        return state;
     }
 
     /**

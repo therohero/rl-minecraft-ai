@@ -15,12 +15,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 - [ ] **Inference server hot-reload.** `inference_server.py` only picks up new
   weights on restart. Watch `model/` (or a `SIGHUP`) and reload `policy.pt` +
   `spec.json` in place.
-- [ ] **Live LSTM inference.** Training supports `--lstm` (recurrent policy
-  head) but the bridges keep no state between ticks, so `export_model.py`
-  refuses an `--lstm` checkpoint. Keep the last LSTM `(h, c)` per bot in
-  `azalea_bot` + the mod (zeroed on match start), thread it through the
-  `policy.pt` call, and read `lstm_hidden` from `spec.json`. Pairs with
-  live frame stacking below.
 - [ ] **Live frame stacking.** Training supports `--frame-stack N` but the
   bridges build one frame, so `export_model.py` refuses `N>1` checkpoints.
   Keep the last `N` observations per bot in `azalea_bot` + the mod (clearing
@@ -75,3 +69,10 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   dummies have no server entity). Add a headless second `azalea` bot (or a
   server-side fake player) so `cps_within_cap` and the win/loss outcome
   assertions become real, then the `mod/` self-merge gate can rely on them.
+  A real in-fight episode boundary (kill/death/disengage) also unlocks
+  testing an `--lstm` checkpoint's reset-at-episode-boundary half of the
+  contract - `lstm_state_carried` in `SelfTest` today only covers that the
+  state is round-tripped between ticks, not that it's zeroed at the
+  boundary (verified by inspection: every boundary funnels through
+  `FightController.resetEpisodeOutcome`, which calls
+  `InferenceClient.resetLstmState`).
