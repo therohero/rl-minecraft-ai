@@ -64,6 +64,37 @@ jar {
 	}
 }
 
+// --- Debug harness: dev-only, must never ship --------------------------------
+// The `rl.minecraft.ai.client.debug` package (verbose per-tick logging, the
+// /rldebug command, test-world creation, the scripted selftest) is compiled
+// with the rest of the client so `./gradlew runClient` can use it, but it is
+// stripped from every jar artifact and only ever loaded reflectively behind
+// FabricLoader.isDevelopmentEnvironment(). See mod/README.md ("Debug harness").
+def DEBUG_PKG = "rl/minecraft/ai/client/debug/"
+
+tasks.withType(org.gradle.jvm.tasks.Jar).configureEach {
+	exclude "${DEBUG_PKG}**"
+}
+
+// Hard stop: fail the build if a debug class ever lands in the remapped jar.
+def verifyNoDebugClasses = tasks.register('verifyNoDebugClasses') {
+	dependsOn tasks.named('remapJar')
+	doLast {
+		def jarFile = tasks.named('remapJar').get().archiveFile.get().asFile
+		def leaked = []
+		new java.util.zip.ZipFile(jarFile).withCloseable { zf ->
+			for (e in zf.entries()) {
+				if (e.name.contains(DEBUG_PKG)) leaked << e.name
+			}
+		}
+		if (!leaked.isEmpty()) {
+			throw new GradleException("debug classes leaked into ${jarFile.name}: ${leaked}")
+		}
+		logger.lifecycle("verifyNoDebugClasses: ${jarFile.name} carries no debug harness classes")
+	}
+}
+tasks.named('build') { dependsOn verifyNoDebugClasses }
+
 // configure the maven publication
 publishing {
 	publications {

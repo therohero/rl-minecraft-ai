@@ -8,7 +8,6 @@ import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 
@@ -46,16 +45,8 @@ public final class ActionApplier {
         ClientPlayerEntity self = client.player;
         if (self == null) return false;
 
-        // --- look: humanise the raw delta (smoothing/rate-clamp/jitter/grid-snap), then integrate ---
-        double[] resolved = guard.resolveRotation(Math.toDegrees(a.yawDelta()), Math.toDegrees(a.pitchDelta()));
-        float newYaw = self.getYaw() + (float) resolved[0];
-        float newPitch = MathHelper.clamp(self.getPitch() + (float) resolved[1], -89.0f, 89.0f);
-        self.lastYaw = self.getYaw();
-        self.lastPitch = self.getPitch();
-        self.setYaw(newYaw);
-        self.setPitch(newPitch);
-        self.setHeadYaw(newYaw);
-        self.setBodyYaw(newYaw);
+        // --- look: plan this tick's virtual-mouse turn (applied per-frame by the guard) ---
+        guard.planLook(self, Math.toDegrees(a.yawDelta()), Math.toDegrees(a.pitchDelta()));
 
         // --- movement keys ---
         boolean forward = a.moveZ() > MOVE_DEAD_ZONE;
@@ -85,7 +76,8 @@ public final class ActionApplier {
             if (self.squaredDistanceTo(target) <= reachSq
                 && self.getAttackCooldownProgress(0.5f) >= 1.0f
                 && facing(self, target)
-                && (!cfg.requireLineOfSight || hasLineOfSight(client, self, target))) {
+                && (!cfg.requireLineOfSight || hasLineOfSight(client, self, target))
+                && guard.tryAttack()) {
                 client.interactionManager.attackEntity(self, target);
                 self.swingHand(Hand.MAIN_HAND);
                 attacked = true;

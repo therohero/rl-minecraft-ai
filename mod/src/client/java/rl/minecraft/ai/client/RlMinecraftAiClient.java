@@ -1,12 +1,16 @@
 package rl.minecraft.ai.client;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+
+import com.mojang.brigadier.arguments.StringArgumentType;
 
 import net.minecraft.util.Identifier;
 
@@ -44,9 +48,15 @@ public class RlMinecraftAiClient implements ClientModInitializer {
         LOGGER.info("rl-minecraft-ai ready - inference at {}, datasets in {}",
             config.inferenceUrl, config.datasetDir);
 
+        maybeInitDebugHarness(config);
+
         // Drive input at the very start of the tick so the keybinding state we
         // set is picked up by vanilla's input polling this same tick.
         ClientTickEvents.START_CLIENT_TICK.register(controller::onClientTick);
+
+        // Per-frame: glide the aim rotation to the framerate (the per-tick
+        // plan is doled out here) so turns don't step 20x/s.
+        HudRenderCallback.EVENT.register((ctx, tickCounter) -> controller.onRenderFrame());
 
         // Small on-screen mode / kit / target / latency readout while fighting.
         if (config.hudEnabled) {
@@ -61,13 +71,18 @@ public class RlMinecraftAiClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, access) ->
             dispatcher.register(ClientCommandManager.literal("fight")
                 .executes(ctx -> {
-                    controller.start(false, ctx.getSource()::sendFeedback);
+                    controller.start(false, false, ctx.getSource()::sendFeedback);
                     return 1;
                 })
-                .then(ClientCommandManager.literal("train").executes(ctx -> {
-                    controller.start(true, ctx.getSource()::sendFeedback);
-                    return 1;
-                }))
+                .then(ClientCommandManager.literal("train")
+                    .executes(ctx -> {
+                        controller.start(true, false, ctx.getSource()::sendFeedback);
+                        return 1;
+                    })
+                    .then(ClientCommandManager.literal("practice").executes(ctx -> {
+                        controller.start(true, true, ctx.getSource()::sendFeedback);
+                        return 1;
+                    })))
                 .then(ClientCommandManager.literal("stop").executes(ctx -> {
                     controller.stop(ctx.getSource()::sendFeedback);
                     return 1;
@@ -75,6 +90,42 @@ public class RlMinecraftAiClient implements ClientModInitializer {
                 .then(ClientCommandManager.literal("status").executes(ctx -> {
                     controller.status(ctx.getSource()::sendFeedback);
                     return 1;
-                }))));
+                }))
+                .then(ClientCommandManager.literal("stopfightingtoggle").executes(ctx -> {
+                    controller.toggleFightThroughDeath(ctx.getSource()::sendFeedback);
+                    return 1;
+                }))
+                .then(ClientCommandManager.literal("target")
+                    .executes(ctx -> {
+                        controller.describeTarget(ctx.getSource()::sendFeedback);
+                        return 1;
+                    })
+                    .then(ClientCommandManager.argument("spec", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            controller.setTarget(StringArgumentType.getString(ctx, "spec"),
+                                ctx.getSource()::sendFeedback);
+                            return 1;
+                        })))));
+    }
+
+    /**
+     * Wire up the dev-only debug harness ({@code /rldebug}, verbose per-tick
+     * logging, test-world creation, the scripted selftest). Its classes live in
+     * {@code rl.minecraft.ai.client.debug} and are stripped from every released
+     * jar (see {@code build.gradle}), so this is reflective and a no-op both in
+     * production and whenever the package is absent.
+     */
+    private void maybeInitDebugHarness(RlConfig config) {
+        if (!FabricLoader.getInstance().isDevelopmentEnvironment()) return;
+        try {
+            Class.forName("rl.minecraft.ai.client.debug.DebugHarness")
+                .getMethod("init", RlConfig.class, FightController.class)
+                .invoke(null, config, controller);
+            LOGGER.info("debug harness active (dev environment) - /rldebug");
+        } catch (ClassNotFoundException e) {
+            // released build: debug classes are not on the classpath - fine.
+        } catch (Throwable t) {
+            LOGGER.warn("debug harness failed to init", t);
+        }
     }
 }
