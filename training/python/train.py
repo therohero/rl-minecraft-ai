@@ -28,9 +28,11 @@ non-circular strength signal.
 import argparse
 import json
 import os
+import queue
 import random
 import signal
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -683,6 +685,21 @@ def main():
         "disable and keep the old single-thread behaviour.",
     )
     parser.add_argument(
+        "--pipeline-rollout",
+        action="store_true",
+        help="collect the next rollout on a background thread while the PPO update (GAE + "
+        "backprop) runs on the main thread, instead of doing the two strictly back to back. "
+        "Both halves already release the GIL for most of their work (env.step blocks on a "
+        "socket recv; the PPO update is torch tensor ops), so this overlaps two otherwise- "
+        "serial phases for close to free throughput. Off by default: it always keeps a "
+        "second CPU copy of the policy for rollout collection (weights synced under a lock "
+        "right after every update, same as the existing GPU collect_model split) - a small "
+        "extra RAM/complexity cost that only pays off once the update is a meaningful "
+        "fraction of wall-time (a big --num-arenas / --rollout-len, a slow --ppo-epochs, or "
+        "a GPU update). Rollout collection then lags the training weights by up to one PPO "
+        "update - the standard async-collection trade-off.",
+    )
+    parser.add_argument(
         "--compile",
         dest="compile_policy",
         action="store_true",
@@ -758,6 +775,9 @@ def main():
     env = None
     model = None
     pool = None
+    pipeline_thread = None
+    pipeline_stop = threading.Event()
+    pipeline_free_q: "queue.Queue" = queue.Queue()
     optimizer = None
     last_update_completed = 0
     last_saved_update = 0
@@ -857,9 +877,19 @@ def main():
         # below) right before the update, where the GPU's larger minibatches
         # actually do help. When `device` is already CPU this is just an
         # alias - no extra cost, no extra copies.
-        collect_model = model if device.type == "cpu" else make_policy()
+        # --pipeline-rollout runs collect_model.act()/forward() concurrently with the main
+        # thread's PPO update (which mutates `model`'s parameters in place via
+        # optimizer.step()), so it always needs its own copy - even on CPU, where the two
+        # would otherwise be the exact same object - synced under `model_lock` after every
+        # update. See the flag's --help for why this is worth doing.
+        collect_model = model if (device.type == "cpu" and not args.pipeline_rollout) else make_policy()
         if collect_model is not model:
             collect_model.load_state_dict(model.state_dict())
+        # Guards every collect_model.act()/forward() call against a concurrent
+        # load_state_dict() from the main thread - a no-op source of contention unless
+        # --pipeline-rollout is on, in which case it's the only thing making the weight
+        # sync safe.
+        model_lock = threading.Lock()
 
         if args.compile_policy:
             # Compile the `forward` method in place (not the whole module) so
@@ -932,8 +962,14 @@ def main():
         total_env_steps = 0
         start_time = time.time()
 
-        for update in range(start_update, args.total_updates + 1):
-            buffer.reset()
+        def run_one_rollout(buf: RolloutBuffer, update: int) -> dict:
+            """Fills `buf` with one `--rollout-len`-step rollout (relaunching the sim first
+            if the terrain curriculum's amplitude changed at this `update`), then returns
+            the bookkeeping the main thread needs to run the PPO update and log progress.
+            Mutates the rollout-collection state (env, obs, hidden, ...) declared nonlocal
+            below - the sole owner of all of it, whether called inline or from the
+            --pipeline-rollout background thread (never both at once for a given call)."""
+            nonlocal env, sim_config_path, curr_amp, cur_obs_np, obs, hidden, episode_return
 
             # Terrain curriculum: when this update's amplitude step differs
             # from the running sim's, relaunch the sim at the new amplitude.
@@ -973,11 +1009,18 @@ def main():
             # The LSTM state entering this rollout is what truncated BPTT
             # replays from; the opponent net carries its own state, freshly
             # zeroed since a new opponent is drawn every iteration.
-            buffer.set_init_hidden(hidden)
+            buf.set_init_hidden(hidden)
             opp_hidden = opp_net.zero_hidden(opp_idx.size) if opp_kind == "net" else None
 
+            episode_returns: list = []
+            wins = matches = scripted_w = scripted_m = env_steps = 0
+
             for _ in range(args.rollout_len):
-                act_out = collect_model.act(obs, hidden)
+                # Locked so a concurrent --pipeline-rollout weight sync
+                # (main thread, after its PPO update) can't race a forward
+                # pass here - a no-op lock when collect_model isn't shared.
+                with model_lock:
+                    act_out = collect_model.act(obs, hidden)
                 actions = build_actions(act_out, num_slots)
 
                 if opp_kind == "scripted":
@@ -988,12 +1031,12 @@ def main():
                     actions[opp_idx] = build_actions(opp_out, opp_idx.size)
 
                 next_obs_np, rewards, dones, info = env.step(actions)
-                total_env_steps += num_slots
+                env_steps += num_slots
                 hidden = _reset_hidden(act_out["hidden"], dones)
                 if opp_kind == "net":
                     opp_hidden = _reset_hidden(opp_out["hidden"], dones[opp_idx])
 
-                buffer.add(
+                buf.add(
                     obs=obs,
                     raw_cont=act_out["raw_cont"],
                     binary_action=act_out["binary_action"],
@@ -1008,14 +1051,14 @@ def main():
                 if dones.any():
                     finished = np.nonzero(dones)[0]
                     learner_finished = finished[iter_learner[finished]]
-                    recent_returns.extend(episode_return[learner_finished].tolist())
+                    episode_returns.extend(episode_return[learner_finished].tolist())
                     episode_return[finished] = 0.0
-                    recent_matches += learner_finished.size
-                    recent_wins += int(np.count_nonzero(info["won"][learner_finished]))
+                    matches += learner_finished.size
+                    wins += int(np.count_nonzero(info["won"][learner_finished]))
                     if opp_kind == "scripted":
                         bench_finished = finished[bench_slots[finished]]
-                        scripted_matches += bench_finished.size
-                        scripted_wins += int(np.count_nonzero(info["won"][bench_finished]))
+                        scripted_m += bench_finished.size
+                        scripted_w += int(np.count_nonzero(info["won"][bench_finished]))
 
                 if args.obs_noise > 0.0:
                     next_obs_np = next_obs_np + opp_rng.normal(
@@ -1024,8 +1067,83 @@ def main():
                 cur_obs_np = next_obs_np
                 obs = torch.as_tensor(stacker.push(next_obs_np, dones) if stacker else next_obs_np)
 
-            with torch.no_grad():
+            with model_lock, torch.no_grad():
                 *_, last_value, _ = collect_model.forward(obs, hidden)
+
+            return {
+                "last_value": last_value,
+                "iter_mask_t": iter_mask_t,
+                "curr_amp": curr_amp,
+                "episode_returns": episode_returns,
+                "wins": wins,
+                "matches": matches,
+                "scripted_wins": scripted_w,
+                "scripted_matches": scripted_m,
+                "env_steps": env_steps,
+            }
+
+        # --pipeline-rollout: a background thread keeps run_one_rollout at most one
+        # rollout ahead of the main thread via two RolloutBuffers handed back and forth
+        # through a pair of queues (free_q: buffers the collector may fill; ready_q: a
+        # filled buffer waiting on the main thread). Depth 1 by construction (ready_q's
+        # maxsize=1) - the collector can get at most one rollout ahead before it blocks
+        # on free_q waiting for the main thread to finish the previous PPO update and
+        # hand a buffer back.
+        pipeline_ready_q: "queue.Queue" = queue.Queue(maxsize=1)
+        pipeline_error: list = [None]
+        if args.pipeline_rollout:
+            second_buffer = RolloutBuffer(
+                args.rollout_len, num_slots, obs_dim, torch.device("cpu"), lstm_hidden=lstm_hidden
+            )
+            pipeline_free_q.put(buffer)
+            pipeline_free_q.put(second_buffer)
+
+            def _pipeline_worker():
+                u = start_update
+                while not pipeline_stop.is_set() and u <= args.total_updates:
+                    buf = pipeline_free_q.get()
+                    if buf is None:
+                        return
+                    buf.reset()
+                    try:
+                        roll_stats = run_one_rollout(buf, u)
+                    except BaseException as e:  # noqa: BLE001 - surfaced to the main thread below
+                        pipeline_error[0] = e
+                        pipeline_ready_q.put(None)
+                        return
+                    pipeline_ready_q.put((u, buf, roll_stats))
+                    u += 1
+
+            pipeline_thread = threading.Thread(
+                target=_pipeline_worker, name="rollout-collector", daemon=True
+            )
+            pipeline_thread.start()
+            log.info(
+                "--pipeline-rollout: collecting each rollout on a background thread, "
+                "overlapped with the previous update"
+            )
+
+        for update in range(start_update, args.total_updates + 1):
+            if pipeline_thread is not None:
+                item = pipeline_ready_q.get()
+                if item is None:
+                    raise pipeline_error[0] or RuntimeError("rollout collector thread failed")
+                got_update, buf, roll_stats = item
+                assert got_update == update, f"pipeline desync: expected update {update}, got {got_update}"
+            else:
+                buffer.reset()
+                roll_stats = run_one_rollout(buffer, update)
+                buf = buffer
+
+            last_value = roll_stats["last_value"]
+            iter_mask_t = roll_stats["iter_mask_t"]
+            curr_amp = roll_stats["curr_amp"]
+            total_env_steps += roll_stats["env_steps"]
+            recent_returns.extend(roll_stats["episode_returns"])
+            recent_matches += roll_stats["matches"]
+            recent_wins += roll_stats["wins"]
+            scripted_wins += roll_stats["scripted_wins"]
+            scripted_matches += roll_stats["scripted_matches"]
 
             # Linearly anneal the entropy bonus from --entropy-coef-start down to
             # --entropy-coef-end over the run, so exploration is strong early on
@@ -1042,8 +1160,8 @@ def main():
 
             # One bulk transfer of the whole filled rollout to the training
             # device (a no-op if it's already CPU) instead of the per-step
-            # transfers `collect_model`/`buffer` above were built to avoid.
-            device_buffer = buffer.to(device)
+            # transfers `collect_model`/`buf` above were built to avoid.
+            device_buffer = buf.to(device)
             last_value = last_value.to(device)
 
             # The rollout above is latency-bound and runs on `rollout_threads`
@@ -1073,7 +1191,13 @@ def main():
                     torch.set_num_threads(rollout_threads)
 
             if collect_model is not model:
-                collect_model.load_state_dict(model.state_dict())
+                with model_lock:
+                    collect_model.load_state_dict(model.state_dict())
+
+            if pipeline_thread is not None:
+                # Hand the just-processed buffer back for the collector to reuse -
+                # it may already be mid-collection on the other one.
+                pipeline_free_q.put(buf)
 
             if args.opponent_snapshot_every > 0 and update % args.opponent_snapshot_every == 0:
                 pool.add_snapshot(model)
@@ -1167,6 +1291,26 @@ def main():
         except (ValueError, OSError):
             prev_sigint = None  # not the main thread (shouldn't happen here)
         try:
+            env_closed = False
+            if pipeline_thread is not None:
+                # Stop the collector before touching `env`/checkpoints: it may be
+                # blocked either on env.step()'s socket recv (closing `env` here
+                # raises there, which the worker's own except-clause catches and
+                # returns from) or on pipeline_free_q.get() waiting for a buffer
+                # the main loop never got to release (the `None` sentinel below
+                # unblocks that case).
+                pipeline_stop.set()
+                pipeline_free_q.put(None)
+                if env is not None:
+                    try:
+                        env.close()
+                    except Exception:
+                        log.warning("error closing environment while stopping the rollout collector", exc_info=True)
+                    env_closed = True
+                pipeline_thread.join(timeout=10)
+                if pipeline_thread.is_alive():
+                    log.warning("rollout collector thread did not stop within 10s")
+
             if model is not None and last_update_completed > last_saved_update:
                 log.info("saving checkpoint at update=%d before exit", last_update_completed)
                 try:
@@ -1176,7 +1320,7 @@ def main():
                     )
                 except Exception:
                     log.exception("could not save the exit checkpoint")
-            if env is not None:
+            if env is not None and not env_closed:
                 env.close()
             metrics.close()
             if sim_config_path and os.path.isfile(sim_config_path):
