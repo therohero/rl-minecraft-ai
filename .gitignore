@@ -12,5 +12,6 @@ __pycache__/
 /mod/bin/
 /mod/.gradle/
 /mod/run/
+/mod/test-server/
 /training/datasets/
 CLAUDE.md
