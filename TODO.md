@@ -4,12 +4,6 @@ Features and improvements to build. Derived from gaps and `// not implemented`
 notes in the code — prune / reprioritise freely. One branch per item (see
 `CLAUDE.md`), checked off only after the user has verified it.
 
-## Training
-
-- [ ] **Separate-process rollout pipeline.** Perf note in the training-perf
-  memory: after `--update-threads` / auto rollout threads, the next throughput
-  lever is decoupling rollout collection from the update loop (or a GPU box).
-
 ## Live bridge (`azalea-bot/`)
 
 - [ ] **Inference server hot-reload.** `inference_server.py` only picks up new

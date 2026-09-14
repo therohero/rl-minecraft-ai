@@ -272,6 +272,19 @@ the loop flips between the two counts. `--num-arenas` auto-scales from the
 detected CPU count (~12/thread, clamped) since the rollout buffer's RAM
 grows linearly with it.
 
+`--pipeline-rollout` overlaps steps 1 and 3 instead of running them back to
+back: a background thread keeps collecting the *next* rollout into a second
+`RolloutBuffer` while the main thread runs GAE + the PPO update on the one
+just filled, handing buffers back and forth through a pair of queues (depth
+1, so the collector is never more than one rollout ahead). Both halves
+already release the GIL for most of their work (`env.step` blocks on a
+socket recv; the PPO update is torch tensor ops), so this is close to free
+throughput once the update is a meaningful fraction of wall-time. It always
+keeps `collect_model` as a separate CPU copy of the policy (even on CPU,
+where it's normally the same object as `model`), synced under a lock right
+after every update - so rollout collection lags the training weights by up
+to one PPO update, the standard async-collection trade-off. Off by default.
+
 ### Checkpoint lifecycle
 
 `_save_checkpoint` writes both `latest.pt` (the auto-resume point, via a
