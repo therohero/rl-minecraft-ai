@@ -58,6 +58,29 @@ class InferencePolicy(nn.Module):
         return mean, cont_std, binary_probs, slot_probs
 
 
+class InferencePolicyRecurrent(nn.Module):
+    """`InferencePolicy` for a `--lstm` checkpoint: a live bot has no
+    training-loop rollout buffer to carry state in, so unlike training this
+    module takes the incoming `(h, c)` as real inputs and returns the
+    updated pair as real outputs - the caller (inference_server.py) threads
+    them through unchanged from one `/act` call to the next, keyed per bot,
+    zeroed at match start (see azalea-bot/README.md, mod/README.md)."""
+
+    def __init__(self, actor_critic: ActorCritic):
+        super().__init__()
+        self.actor_critic = actor_critic
+
+    def forward(self, obs: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
+        mean, log_std, binary_logits, slot_logits, _value, new_hidden = self.actor_critic.forward(
+            obs, (h, c)
+        )
+        cont_std = log_std.exp()
+        binary_probs = torch.sigmoid(binary_logits)
+        slot_probs = torch.softmax(slot_logits, dim=-1)
+        new_h, new_c = new_hidden
+        return mean, cont_std, binary_probs, slot_probs, new_h, new_c
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=str, required=True)
@@ -74,21 +97,16 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
 
     frame_stack = ckpt.get("frame_stack", 1)
-    if frame_stack != 1:
-        raise SystemExit(
-            f"this checkpoint was trained with --frame-stack {frame_stack}. The live inference "
-            "bridges (azalea-bot, mod) build a single observation frame and don't stack yet, so "
-            "an N>1 checkpoint can't be exported for live play. Train the deployable policy with "
-            "--frame-stack 1, or implement live frame stacking first (see TODO.md)."
-        )
-
     lstm_hidden = (ckpt.get("arch") or {}).get("lstm_hidden", 0)
-    if lstm_hidden:
+    if frame_stack != 1 and lstm_hidden:
+        # Combining both is allowed by train.py but neither live bridge has ever
+        # exercised the combination (frame-stacking's history AND a carried
+        # recurrent state at once); refuse until someone actually needs it
+        # rather than shipping an untested interaction.
         raise SystemExit(
-            f"this checkpoint was trained with --lstm (recurrent head, lstm_hidden={lstm_hidden}). "
-            "The live inference bridges (azalea-bot, mod) keep no recurrent state between ticks, so "
-            "an LSTM checkpoint can't be exported for live play. Train the deployable policy without "
-            "--lstm, or implement live recurrent inference first (see TODO.md)."
+            f"this checkpoint combines --frame-stack {frame_stack} with --lstm (lstm_hidden="
+            f"{lstm_hidden}) - exporting that combination isn't supported yet (untested live "
+            "interaction between the two). Train with only one of the two for a deployable policy."
         )
 
     # Restore the exact sim-side normalization constants and trunk shape this
@@ -115,8 +133,16 @@ def main():
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    wrapped = InferencePolicy(model)
-    example_input = torch.zeros(1, obs_dim)
+    if lstm_hidden:
+        wrapped = InferencePolicyRecurrent(model)
+        example_input = (
+            torch.zeros(1, obs_dim),
+            torch.zeros(1, 1, lstm_hidden),
+            torch.zeros(1, 1, lstm_hidden),
+        )
+    else:
+        wrapped = InferencePolicy(model)
+        example_input = torch.zeros(1, obs_dim)
 
     # TorchScript is deprecated in recent torch in favour of torch.export, but
     # its on-disk format is far more stable *across* torch versions - which is
@@ -124,7 +150,7 @@ def main():
     # a different machine / torch build, possibly months later). torch.export's
     # `.pt2` serialization makes no such cross-version guarantee yet. Revisit
     # when it does. The policy is a plain feed-forward net (Linear/Tanh/
-    # sigmoid/softmax), so a trace is exact.
+    # sigmoid/softmax[/LSTM cell]), so a trace is exact.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=r"`torch\.jit\..*` is deprecated")
         scripted = torch.jit.trace(wrapped, example_input)
@@ -201,18 +227,30 @@ def main():
     # normalization notes for non-Python consumers); assert it hasn't drifted
     # from the actual policy input width - a mismatch means a wire-layout change
     # landed without updating self_fields / effect_fields / inv_items above.
-    if frame_stack == 1 and len(obs_field_order) != obs_dim:
+    # `obs_field_order` always describes one frame; a frame-stacked policy's
+    # real input is `frame_stack` copies of it concatenated (newest first -
+    # see azalea-bot/README.md's live frame-stacking section).
+    if len(obs_field_order) * frame_stack != obs_dim:
         raise SystemExit(
-            f"spec obs_field_order has {len(obs_field_order)} entries but the policy takes "
-            f"obs_dim={obs_dim} - update the field lists in export_model.py to match "
-            "features.py's observation layout"
+            f"spec obs_field_order has {len(obs_field_order)} entries (x frame_stack={frame_stack} "
+            f"= {len(obs_field_order) * frame_stack}) but the policy takes obs_dim={obs_dim} - "
+            "update the field lists in export_model.py to match features.py's observation layout"
         )
 
     spec = {
         "obs_dim": obs_dim,
-        # 1 for every deployable checkpoint today; the live bridges assume it
-        # and export refuses anything else. Present so a future live
-        # frame-stacking path has the depth to read.
+        # Width of one *raw* (pre-normalization) wire **observation** row -
+        # `features.WIRE_FLOATS_PER_SLOT` minus the trailing `OBS_EVENT_FLOATS`
+        # (reward/damage/won/lost/done) that only exist as the *sim's* own
+        # per-step output, not something a live bot has to report as input.
+        # Not `obs_dim` either (yaw/pitch are 2 raw floats here vs. 4 sin/cos
+        # floats once normalized). Only meaningful for the optional binary
+        # `/act` body (frame_stack=1, no LSTM - see azalea-bot/README.md's
+        # binary-body section); JSON bodies ignore it entirely.
+        "wire_floats_per_slot": features.WIRE_FLOATS_PER_SLOT - features.OBS_EVENT_FLOATS,
+        # Live bridges concatenate the last `frame_stack` raw observations
+        # (newest first) into the /act request when this is > 1 - see
+        # azalea-bot/README.md's live frame-stacking section.
         "frame_stack": frame_stack,
         "obs_field_order": obs_field_order,
         "kit": sim_config.get("kit"),
@@ -229,7 +267,11 @@ def main():
         "binary_action_dim": BINARY_ACTION_DIM,
         "binary_action_order": ["jump", "attack", "sprint", "use_item", "sneak"],
         "binary_action_threshold": 0.5,
-        "policy_outputs": ["cont_mean", "cont_std", "binary_probs", "slot_probs"],
+        "policy_outputs": (
+            ["cont_mean", "cont_std", "binary_probs", "slot_probs", "lstm_h", "lstm_c"]
+            if lstm_hidden
+            else ["cont_mean", "cont_std", "binary_probs", "slot_probs"]
+        ),
         "input_order": sim_config.get("input_order"),
         "hotbar_slots": features.HOTBAR_SLOTS,
         # held_slot action: `0..hotbar_slots` selects a physical slot (press

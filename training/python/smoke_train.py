@@ -14,15 +14,16 @@ then asserts on the run's own log output + the files it left behind:
   3. `evaluate.py` rates the resulting checkpoints against each other + the
      scripted bot and prints an Elo table;
   4. a `--frame-stack 3` run trains, resumes, and evaluates; a stack
-     mismatch on resume is rejected and `export_model.py` refuses the
-     stacked checkpoint for live play;
+     mismatch on resume is rejected and `export_model.py` now exports it
+     (live frame stacking - see azalea-bot/README.md);
   5. a `--sim-config` with splash potions + enchantments trains and
      evaluates without error;
   6. a `--terrain-curriculum-updates` run ramps the terrain amplitude up
      via mid-run sim relaunches and completes;
   7. an `--lstm` (recurrent head) run trains, resumes, and evaluates; a head
-     mismatch on resume is rejected and `export_model.py` refuses the
-     recurrent checkpoint for live play;
+     mismatch on resume is rejected and `export_model.py` now exports it
+     (live recurrent inference); combining `--lstm` with `--frame-stack` is
+     still refused at export (untested live interaction);
   8. a `--pipeline-rollout` run (background-thread rollout collection
      overlapped with the PPO update) trains, resumes, and survives a
      terrain-curriculum sim relaunch mid-run without desyncing or hanging.
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import shutil
@@ -221,9 +223,13 @@ def main() -> int:
         fs_eval = _run_eval(sim_binary, fs_ckpt)
         _require("frame_stack=3" in fs_eval, "evaluate.py did not pick up the candidate's frame_stack", fs_eval)
         exp = _run_export(os.path.join(fs_ckpt, "latest.pt"))
-        _require(exp.returncode != 0 and "frame-stack 3" in (exp.stdout + exp.stderr),
-                 "export_model.py should refuse a frame-stacked checkpoint", exp.stdout + exp.stderr)
-        print("      ok: frame stacking trains, resumes, evaluates; refused for live export")
+        _require(exp.returncode == 0, "export_model.py should export a frame-stacked checkpoint now that "
+                 "live frame stacking exists", exp.stdout + exp.stderr)
+        with open(os.path.join(tmp, "fs", "model", "spec.json")) as f:
+            fs_spec = json.load(f)
+        _require(fs_spec.get("frame_stack") == 3, f"spec.json frame_stack={fs_spec.get('frame_stack')}, expected 3",
+                 exp.stdout + exp.stderr)
+        print("      ok: frame stacking trains, resumes, evaluates, exports for live play (spec frame_stack=3)")
 
         pot_ckpt = os.path.join(tmp, "pot")
         cfg_path = os.path.join(tmp, "pot.json")
@@ -267,9 +273,27 @@ def main() -> int:
 
         _run_eval(sim_binary, lstm_ckpt)
         ls_exp = _run_export(os.path.join(lstm_ckpt, "latest.pt"))
-        _require(ls_exp.returncode != 0 and "lstm" in (ls_exp.stdout + ls_exp.stderr).lower(),
-                 "export_model.py should refuse a recurrent checkpoint", ls_exp.stdout + ls_exp.stderr)
-        print("      ok: LSTM head trains, resumes, evaluates; head mismatch + live export refused")
+        _require(ls_exp.returncode == 0, "export_model.py should export a recurrent checkpoint now that "
+                 "live LSTM inference exists", ls_exp.stdout + ls_exp.stderr)
+        with open(os.path.join(tmp, "lstm", "model", "spec.json")) as f:
+            ls_spec = json.load(f)
+        _require(ls_spec.get("arch", {}).get("lstm_hidden") == 16,
+                 f"spec.json arch.lstm_hidden={ls_spec.get('arch', {}).get('lstm_hidden')}, expected 16",
+                 ls_exp.stdout + ls_exp.stderr)
+        _require("lstm_h" in ls_spec.get("policy_outputs", []),
+                 "spec.json policy_outputs should list lstm_h/lstm_c for a recurrent export", ls_exp.stdout)
+        print("      ok: LSTM head trains, resumes, evaluates, exports for live play (spec lstm_hidden=16)")
+        print("      ok: head mismatch on resume still rejected")
+
+        both_ckpt = os.path.join(tmp, "both")
+        both = _run_training(sim_binary, both_ckpt, 2, fresh=True,
+                              extra=["--lstm", "--lstm-hidden", "8", "--frame-stack", "2"])
+        _require(_last_update_in_log(both) == 2, "combined lstm+frame-stack run stopped early", both)
+        both_exp = _run_export(os.path.join(both_ckpt, "latest.pt"))
+        _require(both_exp.returncode != 0 and "combines" in (both_exp.stdout + both_exp.stderr),
+                 "export_model.py should still refuse combining --lstm with --frame-stack (untested "
+                 "live interaction)", both_exp.stdout + both_exp.stderr)
+        print("      ok: combining --lstm with --frame-stack is still refused at export")
 
         pipe_ckpt = os.path.join(tmp, "pipe")
         print(f"[8/8] pipeline-rollout run: --pipeline-rollout fresh + resume + curriculum relaunch -> {pipe_ckpt}")

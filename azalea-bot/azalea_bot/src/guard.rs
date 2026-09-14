@@ -42,13 +42,17 @@ use std::time::{Duration, Instant};
 
 use azalea::block::BlockState;
 use azalea::ecs::prelude::Entity;
-use azalea::entity::{Physics, Position};
+use azalea::entity::{LookDirection, Physics, Position};
+use azalea::interact::pick::pick_block;
 use azalea::physics::collision::BlockWithShape;
 use azalea::world::Instance;
 use azalea::{BlockPos, SprintDirection, WalkDirection};
 use log::info;
 
-use crate::{discretize_walk_direction, nearest_player_entities, sprint_direction_for, Action, State};
+use crate::{
+    discretize_walk_direction, is_minable_placed_block, nearest_player_entities,
+    sprint_direction_for, Action, State,
+};
 
 /// Vanilla eye height (standing) - the crosshair ray starts here.
 const EYE_HEIGHT: f64 = 1.62;
@@ -92,6 +96,11 @@ pub(crate) struct GuardConfig {
     pub aim_settle_deg: f64,
     /// Melee reach, eye to hitbox surface (blocks). Vanilla survival: 3.0.
     pub reach: f64,
+    /// Block-interaction reach for mining a placed block (`uhc` kit) and for
+    /// item placement (blocks). Mirrors `sim/src/config.rs::CombatConfig`'s
+    /// `place_reach` (vanilla survival default 4.5) - the sim's mine/place
+    /// range, distinct from melee `reach`.
+    pub mine_reach: f64,
     /// Hitbox inflation for the crosshair test (blocks) - vanilla inflates
     /// the attack pick AABB by 0.1.
     pub hitbox_expansion: f64,
@@ -121,6 +130,7 @@ impl Default for GuardConfig {
             aim_jitter_deg: 0.4,
             aim_settle_deg: 50.0,
             reach: 3.0,
+            mine_reach: 4.5,
             hitbox_expansion: 0.1,
             require_line_of_sight: true,
             max_cps: 12.0,
@@ -153,6 +163,9 @@ impl GuardConfig {
         }
         if let Some(v) = env_f64("AZALEA_GUARD_REACH") {
             c.reach = v;
+        }
+        if let Some(v) = env_f64("AZALEA_GUARD_MINE_REACH") {
+            c.mine_reach = v;
         }
         if let Some(v) = env_f64("AZALEA_GUARD_HITBOX_EXPANSION") {
             c.hitbox_expansion = v.max(0.0);
@@ -200,6 +213,10 @@ pub(crate) struct SafeAction {
     pub jump: bool,
     /// The exact entity to swing at this tick, or `None` for no attack.
     pub attack: Option<Entity>,
+    /// A placed block to mine this tick (`uhc` kit, pickaxe/axe only) -
+    /// mutually exclusive with `attack`; mining always wins when both would
+    /// apply, mirroring `sim/src/arena.rs::mine_step`'s priority over melee.
+    pub mine: Option<BlockPos>,
     pub use_item: bool,
     pub sneak: bool,
     pub held_slot: i64,
@@ -256,7 +273,15 @@ impl Guard {
 
     /// Turn one raw policy [`Action`] into a [`SafeAction`], updating the
     /// bot's tracked look direction in `state.look` as a side effect.
-    pub fn sanitize(&mut self, bot: &azalea::Client, state: &State, raw: &Action) -> SafeAction {
+    /// `held_is_mining_tool`: the bot currently has a pickaxe or axe
+    /// selected (only then is a mine attempt even considered).
+    pub fn sanitize(
+        &mut self,
+        bot: &azalea::Client,
+        state: &State,
+        raw: &Action,
+        held_is_mining_tool: bool,
+    ) -> SafeAction {
         let (yaw, pitch) = self.resolve_look(state, raw);
 
         let walk = discretize_walk_direction(raw.move_x, raw.move_z);
@@ -265,14 +290,24 @@ impl Guard {
         let jump = self.resolve_jump(bot, raw);
         let sneak = self.resolve_sneak(raw);
 
-        let attack = if raw.attack {
+        // Mining a placed block takes priority over a melee swing whenever
+        // both the tool and a valid target are there, mirroring the sim's
+        // `mine_step`-before-`resolve_melee` order - it doesn't touch the
+        // click-cadence/aim-settle bookkeeping `resolve_attack` owns, since
+        // mining isn't a click.
+        let mine = if raw.attack && held_is_mining_tool {
+            self.resolve_mine_target(bot, yaw, pitch)
+        } else {
+            None
+        };
+        let attack = if raw.attack && mine.is_none() {
             self.resolve_attack(bot, state, yaw, pitch)
         } else {
             None
         };
         // Vanilla never attacks and uses an item on the same tick; an
-        // attack always wins (it drops any raised guard anyway).
-        let use_item = raw.use_item && attack.is_none();
+        // attack (or a mine) always wins (it drops any raised guard anyway).
+        let use_item = raw.use_item && attack.is_none() && mine.is_none();
 
         self.maybe_report();
 
@@ -283,10 +318,31 @@ impl Guard {
             pitch_deg: pitch.to_degrees() as f32,
             jump,
             attack,
+            mine,
             use_item,
             sneak,
             held_slot: raw.held_slot,
         }
+    }
+
+    /// The placed block (plank/cobweb only - see [`is_minable_placed_block`])
+    /// under the crosshair within `mine_reach`, if any. Raycasts against the
+    /// freshly-resolved `(yaw, pitch)` directly (not the possibly one-tick-
+    /// stale `HitResultComponent`), the same way `resolve_attack` raycasts
+    /// entities against it rather than relying on stale ECS state.
+    fn resolve_mine_target(&self, bot: &azalea::Client, yaw: f64, pitch: f64) -> Option<BlockPos> {
+        let self_pos = bot.get_component::<Position>()?;
+        let eye = azalea::Vec3::new(self_pos.x, self_pos.y + EYE_HEIGHT, self_pos.z);
+        let look = LookDirection::new(yaw.to_degrees() as f32, pitch.to_degrees() as f32);
+
+        let world = bot.world();
+        let world = world.read();
+        let hit = pick_block(look, eye, &world.chunks, self.cfg.mine_reach);
+        if hit.miss {
+            return None;
+        }
+        let block_state = world.get_block_state(hit.block_pos)?;
+        is_minable_placed_block(block_state).then_some(hit.block_pos)
     }
 
     /// Integrate the policy's look deltas: low-pass, rate-limit, add a small
@@ -751,6 +807,8 @@ mod tests {
             use_item: false,
             sneak: false,
             held_slot: 0,
+            lstm_h: None,
+            lstm_c: None,
         }
     }
 }

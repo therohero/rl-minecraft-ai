@@ -102,6 +102,7 @@ mod guard;
 mod inference;
 mod tracker;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -117,13 +118,15 @@ use azalea::entity::metadata::{
 };
 use azalea::entity::{LocalEntity, Position};
 use azalea::container::ContainerClientExt;
+use azalea::inventory::components::PotionContents;
 use azalea::inventory::operations::SwapClick;
-use azalea::inventory::ItemStack;
+use azalea::inventory::ItemStackData;
 use azalea::local_player::TabList;
+use azalea::mining::{MineProgress, StopMiningBlockEvent};
 use azalea::physics::collision::BlockWithShape;
 use azalea::player::GameProfileComponent;
 use azalea::prelude::*;
-use azalea::registry::builtin::ItemKind;
+use azalea::registry::builtin::{ItemKind, Potion};
 use azalea::world::MinecraftEntityId;
 use azalea::{ClientBuilder, SprintDirection, WalkDirection};
 use bevy_ecs::prelude::{Entity, With, Without};
@@ -168,6 +171,16 @@ struct Consts {
     /// attack/use lock-out). Only `Modern` makes `self_swap_lockout` ever
     /// non-zero.
     input_order: InputOrder,
+    /// Observations fed to the policy = the last this-many frames
+    /// concatenated (spec.json's `frame_stack`; 1 = memoryless). See
+    /// `mod inference` and the `Event::Tick` handler for how the bot keeps
+    /// that history and feeds it to `/act`.
+    frame_stack: usize,
+    /// LSTM hidden width if this policy has a recurrent head (spec.json's
+    /// `arch.lstm_hidden`), else 0. The bot carries `(h, c)` between `/act`
+    /// calls (see `State::lstm_state`) rather than the server keeping any
+    /// per-bot session state.
+    lstm_hidden: usize,
 }
 
 /// Mirrors `sim/src/config.rs::InputOrder` - which of the vanilla
@@ -207,6 +220,8 @@ impl Default for Consts {
             swap_lockout_seconds: 0.05,
             hurt_invulnerability_seconds: 1.0,
             input_order: InputOrder::Legacy,
+            frame_stack: 1,
+            lstm_hidden: 0,
         }
     }
 }
@@ -229,6 +244,16 @@ struct Spec {
     block_view_size: Option<usize>,
     #[serde(default)]
     input_order: Option<String>,
+    #[serde(default)]
+    frame_stack: Option<usize>,
+    #[serde(default)]
+    arch: SpecArch,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SpecArch {
+    #[serde(default)]
+    lstm_hidden: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -278,6 +303,8 @@ impl Spec {
                 Some("modern") => InputOrder::Modern,
                 _ => InputOrder::Legacy,
             },
+            frame_stack: self.frame_stack.unwrap_or(d.frame_stack).max(1),
+            lstm_hidden: self.arch.lstm_hidden.unwrap_or(d.lstm_hidden),
         }
     }
 }
@@ -313,6 +340,22 @@ struct State {
     /// Tick of the last inventory-screen hotbar hotkey, so the policy can't
     /// strobe the inventory open and closed (see `apply_held_slot`).
     last_hotkey_tick: Arc<AtomicU64>,
+    /// The last `consts.frame_stack - 1` observations (newest first),
+    /// zero-padded server-side for the ticks before that much history
+    /// exists. Cleared on respawn (`Event::Death`), mirroring the sim
+    /// zeroing a slot's stack on every new episode. No-op when
+    /// `consts.frame_stack <= 1`.
+    frame_history: Arc<Mutex<VecDeque<Observation>>>,
+    /// Carried LSTM `(h, c)` for a recurrent policy (`consts.lstm_hidden >
+    /// 0`), threaded through `/act` each tick and updated from the
+    /// response. Zeroed on respawn. Empty (and never sent) for a
+    /// memoryless policy.
+    lstm_state: Arc<Mutex<(Vec<f32>, Vec<f32>)>>,
+    /// Whether `apply_action` currently has a `start_mining` in flight -
+    /// tracked so it only fires `StopMiningBlockEvent` on the falling edge.
+    /// That event's handler unconditionally unwraps the mine-target
+    /// component, so sending it while nothing is being mined panics the ECS.
+    is_mining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for State {
@@ -330,6 +373,9 @@ impl Default for State {
             trk: Arc::new(Mutex::new(Tracker::new())),
             my_id: Arc::new(Mutex::new(None)),
             last_hotkey_tick: Arc::new(AtomicU64::new(0)),
+            frame_history: Arc::new(Mutex::new(VecDeque::new())),
+            lstm_state: Arc::new(Mutex::new((Vec::new(), Vec::new()))),
+            is_mining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -354,6 +400,12 @@ pub(crate) struct Action {
     /// `sim/src/kit.rs::HOTBAR_ACTION_DIM`).
     #[serde(default)]
     pub held_slot: i64,
+    /// Updated recurrent state from a `--lstm` policy (see `Consts::lstm_hidden`),
+    /// carried into the *next* `/act` call. `None` for a memoryless policy.
+    #[serde(default)]
+    pub lstm_h: Option<Vec<f32>>,
+    #[serde(default)]
+    pub lstm_c: Option<Vec<f32>>,
 }
 
 /// One nearby player block, mirroring `OtherPlayer` in sim/src/protocol.rs.
@@ -444,9 +496,9 @@ pub(crate) struct Observation {
     /// Post-swap attack/use lock-out fraction (modern input order only) -
     /// the bot counts down the ticks after each hotbar swap it makes.
     self_swap_lockout: f64,
-    /// Block-break progress 0..1 (the sim's `uhc` pickaxe mining). This bot
-    /// doesn't mine, so it always reports 0; the field exists to keep the
-    /// wire row the same width as `sim/src/protocol.rs`.
+    /// Block-break progress 0..1 (the sim's `uhc` pickaxe/axe mining) -
+    /// azalea's own `MineProgress` component, driven by `apply_action`'s
+    /// `bot.start_mining` calls (see `guard::resolve_mine_target`).
     self_mining: f64,
     /// One float per `effects::Effect` (Speed, Slowness, Strength, Weakness,
     /// Regeneration, Poison, InstantHealth, InstantDamage, FireResistance):
@@ -590,11 +642,12 @@ async fn main() -> eyre::Result<()> {
         Consts::default()
     });
     info!("observation constants: {consts:?}");
+    let lstm_hidden = consts.lstm_hidden;
 
     let guard_cfg = GuardConfig::from_env();
     info!("legality guard: {guard_cfg:?}");
 
-    let (obs_tx, obs_rx) = watch::channel::<Option<(u64, Observation)>>(None);
+    let (obs_tx, obs_rx) = watch::channel::<Option<inference::ObsPacket>>(None);
     let action = ActionCell::default();
     let act_url = Arc::new(inference_url);
     tokio::spawn(inference::run_worker(
@@ -614,6 +667,9 @@ async fn main() -> eyre::Result<()> {
         trk: Arc::new(Mutex::new(Tracker::new())),
         my_id: Arc::new(Mutex::new(None)),
         last_hotkey_tick: Arc::new(AtomicU64::new(0)),
+        frame_history: Arc::new(Mutex::new(VecDeque::new())),
+        lstm_state: Arc::new(Mutex::new((vec![0.0; lstm_hidden], vec![0.0; lstm_hidden]))),
+        is_mining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let account = match cli.auth {
@@ -675,9 +731,29 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
         Event::Tick => {
             let tick = state.ticks.fetch_add(1, Ordering::Relaxed);
 
-            // 1. publish this tick's observation for the async worker.
+            // 1. publish this tick's observation for the async worker, along
+            //    with whatever frame-stack history / LSTM state this
+            //    policy needs (both no-ops for a plain memoryless policy).
             if let Some(observation) = build_observation(&bot, &state) {
-                state.obs_tx.send_replace(Some((tick, observation)));
+                let prev_frames = if state.consts.frame_stack > 1 {
+                    state.frame_history.lock().unwrap().iter().cloned().collect()
+                } else {
+                    Vec::new()
+                };
+                let lstm = (state.consts.lstm_hidden > 0)
+                    .then(|| state.lstm_state.lock().unwrap().clone());
+                state.obs_tx.send_replace(Some(inference::ObsPacket {
+                    tick,
+                    obs: observation.clone(),
+                    prev_frames,
+                    lstm,
+                }));
+
+                if state.consts.frame_stack > 1 {
+                    let mut hist = state.frame_history.lock().unwrap();
+                    hist.push_front(observation);
+                    hist.truncate(state.consts.frame_stack - 1);
+                }
             }
 
             // 2. apply the freshest action the worker has produced. Missing
@@ -689,11 +765,17 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                         "inference is {staleness} ticks behind - is the model server keeping up?"
                     );
                 }
-                let safe = state
-                    .guard
-                    .lock()
-                    .unwrap()
-                    .sanitize(&bot, &state, &decision.action);
+                if let (Some(h), Some(c)) = (&decision.action.lstm_h, &decision.action.lstm_c) {
+                    *state.lstm_state.lock().unwrap() = (h.clone(), c.clone());
+                }
+                let (_, _, _, _, held_id) = read_inventory(&bot);
+                let held_is_mining_tool = Item::from_id(held_id).is_mining_tool();
+                let safe = state.guard.lock().unwrap().sanitize(
+                    &bot,
+                    &state,
+                    &decision.action,
+                    held_is_mining_tool,
+                );
                 apply_action(&bot, &state, &safe, tick);
             }
         }
@@ -703,9 +785,17 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             // tracked look state: after a respawn the server resets the
             // player's orientation, so the stale tracked yaw/pitch would
             // feed the policy a wrong `self_yaw`/`self_pitch` until the next
-            // `set_direction` corrected it.
+            // `set_direction` corrected it. The observation history / LSTM
+            // state are reset the same way the sim zeroes a slot's stack on
+            // every new episode - the pre-respawn context is meaningless now.
             *state.look.lock().unwrap() = (0.0, 0.0);
             state.guard.lock().unwrap().on_respawn();
+            state.frame_history.lock().unwrap().clear();
+            {
+                let mut lstm = state.lstm_state.lock().unwrap();
+                lstm.0.iter_mut().for_each(|v| *v = 0.0);
+                lstm.1.iter_mut().for_each(|v| *v = 0.0);
+            }
             info!("died - respawning automatically, reset tracked look direction");
         }
         Event::Disconnect(reason) => {
@@ -867,7 +957,7 @@ fn build_observation(bot: &Client, state: &State) -> Option<Observation> {
         self_arrows: arrows as f64,
         self_slot: selected_slot as f64,
         self_swap_lockout: t_swap_lockout,
-        self_mining: 0.0,
+        self_mining: bot.get_component::<MineProgress>().map(|p| p.0 as f64).unwrap_or(0.0),
         self_effects: read_effects(bot),
         inventory,
         hotbar,
@@ -884,7 +974,7 @@ fn build_observation(bot: &Client, state: &State) -> Option<Observation> {
 /// The `kit::Item` ids from sim/src/kit.rs - used for `self_held`, the
 /// `hotbar` layout block and the per-item `inventory` counts. Order is
 /// load-bearing (it's the on-wire id).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
     Empty = 0,
     Sword = 1,
@@ -952,6 +1042,36 @@ impl Item {
         }
     }
 
+    /// Like [`Item::from_kind`], but for a splash potion also reads the
+    /// `PotionContents` data component to tell the five brewed contents the
+    /// kit models apart - `ItemKind` alone is the same generic
+    /// `minecraft:splash_potion` for all of them since 1.20.5's item
+    /// components. Any other potion (water, awkward, night vision, ...) -
+    /// not in the kit - maps to `Empty`, same as `from_kind` would.
+    fn from_stack(kind: ItemKind, data: &ItemStackData) -> Item {
+        if kind != ItemKind::SplashPotion {
+            return Item::from_kind(kind);
+        }
+        data.get_component::<PotionContents>()
+            .and_then(|pc| pc.potion)
+            .map(Item::from_potion)
+            .unwrap_or(Item::Empty)
+    }
+
+    /// Maps a brewed `Potion` to the kit's splash-potion item, or `Empty`
+    /// for one the kit doesn't model. `Strong`/`Long` variants (the sim only
+    /// has one strength/duration per effect) collapse onto the same id.
+    fn from_potion(p: Potion) -> Item {
+        match p {
+            Potion::Healing | Potion::StrongHealing => Item::SplashHealing,
+            Potion::Harming | Potion::StrongHarming => Item::SplashHarming,
+            Potion::Poison | Potion::LongPoison | Potion::StrongPoison => Item::SplashPoison,
+            Potion::Swiftness | Potion::LongSwiftness | Potion::StrongSwiftness => Item::SplashSpeed,
+            Potion::Strength | Potion::LongStrength | Potion::StrongStrength => Item::SplashStrength,
+            _ => Item::Empty,
+        }
+    }
+
     fn id(self) -> usize {
         self as usize
     }
@@ -966,6 +1086,38 @@ impl Item {
     fn is_shieldish(self) -> bool {
         matches!(self, Item::Sword | Item::Axe | Item::Empty)
     }
+
+    /// Holding this can mine a placed block (`uhc` kit) - see
+    /// `guard::resolve_mine_target` / `is_minable_placed_block`.
+    fn is_mining_tool(self) -> bool {
+        matches!(self, Item::Pickaxe | Item::Axe)
+    }
+}
+
+/// Whether `bs` is one of the block types the `uhc` kit can itself place
+/// (a plank variant, or cobweb) - the only blocks live mining ever targets.
+/// Deliberately narrower than "anything with a pickaxe/axe mine time": a
+/// live server's terrain and builds are real, and mining arbitrary world
+/// blocks the kit never placed would be indistinguishable from griefing,
+/// unlike the sim's closed arena where every minable block came from a
+/// player's own hand.
+pub(crate) fn is_minable_placed_block(bs: BlockState) -> bool {
+    use azalea::block::BlockTrait;
+    matches!(
+        Box::<dyn BlockTrait>::from(bs).id(),
+        "cobweb"
+            | "oak_planks"
+            | "spruce_planks"
+            | "birch_planks"
+            | "jungle_planks"
+            | "acacia_planks"
+            | "dark_oak_planks"
+            | "mangrove_planks"
+            | "cherry_planks"
+            | "bamboo_planks"
+            | "crimson_planks"
+            | "warped_planks"
+    )
 }
 
 fn is_arrow_item(kind: ItemKind) -> bool {
@@ -1011,21 +1163,20 @@ fn read_inventory(bot: &Client) -> (Vec<f64>, Vec<f64>, u32, usize, usize) {
     let menu = inv.inventory_menu;
     let selected = inv.selected_hotbar_slot as usize;
 
-    let stack_kind = |s: &ItemStack| -> Option<(ItemKind, i32)> {
-        s.as_present().map(|d| (d.kind, d.count))
-    };
-
-    // Whole-inventory pass: per-kit item counts + arrows.
+    // Whole-inventory pass: per-kit item counts + arrows. `Item::from_stack`
+    // (not `from_kind`) so a splash potion's brewed contents - all the same
+    // generic `ItemKind::SplashPotion` since 1.20.5's item components - are
+    // told apart via its `PotionContents` data.
     for slot in menu.slots() {
-        if let Some((kind, n)) = stack_kind(&slot) {
-            if is_arrow_item(kind) {
-                arrows += n.max(0) as u32;
+        if let Some(d) = slot.as_present() {
+            if is_arrow_item(d.kind) {
+                arrows += d.count.max(0) as u32;
             }
-            let item = Item::from_kind(kind);
+            let item = Item::from_stack(d.kind, d);
             if item != Item::Empty {
                 let idx = item.id() - 1; // inventory block omits `Empty`
                 if idx < counts.len() {
-                    counts[idx] += n.max(0) as f64;
+                    counts[idx] += d.count.max(0) as f64;
                 }
             }
         }
@@ -1040,8 +1191,8 @@ fn read_inventory(bot: &Client) -> (Vec<f64>, Vec<f64>, u32, usize, usize) {
         }
         let item = menu
             .slot(menu_slot)
-            .and_then(&stack_kind)
-            .map(|(kind, _)| Item::from_kind(kind))
+            .and_then(|s| s.as_present())
+            .map(|d| Item::from_stack(d.kind, d))
             .unwrap_or(Item::Empty);
         hotbar[i] = item.id() as f64;
         if i == selected {
@@ -1259,11 +1410,27 @@ fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
         bot.jump();
     }
 
-    if let Some(entity) = safe.attack {
-        bot.attack(entity);
-    } else if safe.use_item {
-        // Raise the shield / draw the bow / eat / place.
-        bot.start_use_item();
+    if let Some(pos) = safe.mine {
+        // `start_mining` is safe to call every tick with the same (or a new)
+        // target - azalea checks internally and only sends abort+restart
+        // packets when the target actually changed.
+        bot.start_mining(pos);
+        state.is_mining.store(true, Ordering::Relaxed);
+    } else {
+        // Only actually send the stop event on the falling edge: its handler
+        // unconditionally unwraps the mine-target component, so firing it
+        // while nothing is being mined would panic the ECS.
+        if state.is_mining.swap(false, Ordering::Relaxed) {
+            bot.ecs.lock().write_message(StopMiningBlockEvent { entity: bot.entity });
+        }
+        if let Some(entity) = safe.attack {
+            bot.attack(entity);
+        } else if safe.use_item {
+            // Raise the shield / draw the bow / eat / place / throw a
+            // splash potion - azalea resolves what "use" means from the
+            // held item and the block/entity under the crosshair.
+            bot.start_use_item();
+        }
     }
 }
 
@@ -1336,7 +1503,7 @@ fn apply_held_slot(bot: &Client, state: &State, held_slot: i64, tick: u64) {
         (0..HOTBAR_SLOTS).find(|&i| {
             menu.slot(*hotbar.start() + i)
                 .and_then(|s| s.as_present())
-                .map(|d| Item::from_kind(d.kind))
+                .map(|d| Item::from_stack(d.kind, d))
                 == Some(want)
         })
     }) {
@@ -1358,7 +1525,7 @@ fn apply_held_slot(bot: &Client, state: &State, held_slot: i64, tick: u64) {
         let selected_menu_slot = *menu.hotbar_slots_range().start() + selected_now as usize;
         menu.slots()
             .iter()
-            .position(|s| s.as_present().map(|d| Item::from_kind(d.kind)) == Some(want))
+            .position(|s| s.as_present().map(|d| Item::from_stack(d.kind, d)) == Some(want))
             .filter(|&s| s != selected_menu_slot)
     });
     let Some(source_slot) = source_slot else { return };
@@ -1408,5 +1575,54 @@ pub(crate) fn sprint_direction_for(walk_dir: WalkDirection) -> Option<SprintDire
         WalkDirection::ForwardLeft => Some(SprintDirection::ForwardLeft),
         WalkDirection::ForwardRight => Some(SprintDirection::ForwardRight),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splash_potion_contents_map_to_the_five_kit_ids() {
+        assert_eq!(Item::from_potion(Potion::Healing), Item::SplashHealing);
+        assert_eq!(Item::from_potion(Potion::StrongHealing), Item::SplashHealing);
+        assert_eq!(Item::from_potion(Potion::Harming), Item::SplashHarming);
+        assert_eq!(Item::from_potion(Potion::Poison), Item::SplashPoison);
+        assert_eq!(Item::from_potion(Potion::LongPoison), Item::SplashPoison);
+        assert_eq!(Item::from_potion(Potion::StrongPoison), Item::SplashPoison);
+        assert_eq!(Item::from_potion(Potion::Swiftness), Item::SplashSpeed);
+        assert_eq!(Item::from_potion(Potion::Strength), Item::SplashStrength);
+    }
+
+    #[test]
+    fn a_potion_the_kit_does_not_model_is_empty() {
+        assert_eq!(Item::from_potion(Potion::Water), Item::Empty);
+        assert_eq!(Item::from_potion(Potion::NightVision), Item::Empty);
+        assert_eq!(Item::from_potion(Potion::Regeneration), Item::Empty);
+        assert_eq!(Item::from_potion(Potion::WaterBreathing), Item::Empty);
+    }
+
+    #[test]
+    fn item_ids_round_trip_through_from_id() {
+        for item in [
+            Item::Sword,
+            Item::Axe,
+            Item::Pickaxe,
+            Item::GoldenHead,
+            Item::SplashHealing,
+            Item::SplashStrength,
+        ] {
+            assert_eq!(Item::from_id(item.id()), item);
+        }
+        assert_eq!(Item::from_id(0), Item::Empty);
+        assert_eq!(Item::from_id(999), Item::Empty); // out of range -> Empty, not a panic
+    }
+
+    #[test]
+    fn only_pickaxe_and_axe_are_mining_tools() {
+        assert!(Item::Pickaxe.is_mining_tool());
+        assert!(Item::Axe.is_mining_tool());
+        assert!(!Item::Sword.is_mining_tool());
+        assert!(!Item::Empty.is_mining_tool());
     }
 }

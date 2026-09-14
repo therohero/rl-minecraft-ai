@@ -6,40 +6,22 @@ notes in the code — prune / reprioritise freely. One branch per item (see
 
 ## Live bridge (`azalea-bot/`)
 
-- [ ] **Inference server hot-reload.** `inference_server.py` only picks up new
-  weights on restart. Watch `model/` (or a `SIGHUP`) and reload `policy.pt` +
-  `spec.json` in place.
-- [ ] **Live LSTM inference.** Training supports `--lstm` (recurrent policy
-  head) but the bridges keep no state between ticks, so `export_model.py`
-  refuses an `--lstm` checkpoint. Keep the last LSTM `(h, c)` per bot in
-  `azalea_bot` + the mod (zeroed on match start), thread it through the
-  `policy.pt` call, and read `lstm_hidden` from `spec.json`. Pairs with
-  live frame stacking below.
-- [ ] **Live frame stacking.** Training supports `--frame-stack N` but the
-  bridges build one frame, so `export_model.py` refuses `N>1` checkpoints.
-  Keep the last `N` observations per bot in `azalea_bot` + the mod (clearing
-  on match start) and feed the concatenation; read `frame_stack` from
-  `spec.json`.
-- [ ] **Live splash potions.** Both bridges report `self_effects` now, but:
-  `azalea_bot` doesn't distinguish a splash potion's contents (maps
-  `ItemKind::SplashPotion` → `Empty`) and neither bridge actually *throws*
-  one on the `use_item` action. Map the potion registry → the 5 ids and
-  make `use_item` with a potion selected throw it.
-- [ ] **Optional binary `/act` body.** Keep HTTP+JSON as the default, but
-  accept a flat-`f32` observation body (and return a flat action) on the same
-  endpoint for the case where JSON encode/decode ever shows up in the
-  round-trip stats.
-- [ ] **Live mining for the `uhc` kit.** `azalea_bot` and the mod hardcode
-  `self_mining = 0` and never break placed blocks, so the trained UHC
-  block-mining behaviour is dead live. Implement pickaxe/axe mining of placed
-  blocks in both bridges.
-- [ ] **UHC placement parity.** Verify planks / cobweb / bucket placement via
-  `use_item` actually lands where the policy expects (eye raycast ~4.5
-  blocks), and expose the golden head (currently unreachable — only 9 hotbar
-  slots, no hotkey for it).
-- [ ] **ViaProxy online-mode auth.** `run_bot.sh` writes `viaproxy.yml` with
-  `auth-method: NONE`; automate the online-mode (Microsoft) path instead of a
-  manual edit.
+- [ ] **`azalea_bot` live features need a real-server check.** LSTM inference,
+  frame stacking, splash potions, `uhc` mining, and the ViaProxy Microsoft-auth
+  setup were all implemented and unit/protocol-tested (`cargo test`, a live
+  `inference_server.py` round-trip for JSON/binary/frame-stack/LSTM/hot-reload),
+  but none have run against a *real* server / real match yet - see
+  `azalea-bot/README.md`'s new sections for what to look for:
+  correct behaviour under live latency, mining actually breaking a placed
+  plank/cobweb block without misfiring on world terrain, a potion actually
+  landing its effect, and the ViaProxy device-code flow actually completing
+  end to end (needs a human to open the printed URL - untestable here).
+- [ ] **UHC placement / golden head: real-server check.** Reasoned to already
+  be correct by construction (`azalea_bot`'s placement and the block-view
+  reach both go through azalea's own `block_interaction_range`-driven
+  crosshair hit-testing, which is vanilla's 4.5 blocks - matching the sim's
+  `place_reach` exactly - see azalea-bot/README.md), but never checked
+  against a real server.
 
 ## Sim fidelity (`training/sim/`)
 
@@ -53,6 +35,14 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   makes the same cross-version guarantee.
 ## Mod (`mod/`)
 
+- [ ] **Bring the mod's live bridge up to parity with `azalea_bot`.**
+  `azalea_bot` now supports live LSTM inference, live frame stacking, live
+  splash potions (mapping + throwing), and live `uhc` mining (see
+  azalea-bot/README.md for how each works and the wire-protocol additions
+  `inference_server.py` now accepts); the mod (`ObservationBuilder` /
+  `InferenceClient` / `FightController`'s action application) doesn't have
+  any of these yet, so a `--lstm`, `--frame-stack N>1`, splash-potion, or
+  `uhc`-mining checkpoint is still dead when played through `/fight`.
 - [ ] **Tune the mod virtual-mouse against a real anticheat.** `ClientGuard`'s
   new mouse model has plausible-but-guessed defaults (`max_yaw_accel_deg`,
   `aim_latency_ticks`, `max_cps`, tremor). Validate / retune them against

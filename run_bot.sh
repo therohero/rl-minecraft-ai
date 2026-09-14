@@ -13,8 +13,18 @@
 #                a JRE on PATH. ViaProxy is downloaded once into
 #                azalea-bot/viaproxy/.
 #   AUTH         'offline' (default) or 'microsoft' - passed to the bot as
-#                --auth. With ViaProxy, leave this 'offline' (ViaProxy does
-#                the upstream auth; see azalea-bot/viaproxy/viaproxy.yml).
+#                --auth. Without MC_VERSION (connecting natively) this is the
+#                bot's own auth. With MC_VERSION (through ViaProxy) the bot
+#                always connects to the *local* ViaProxy as 'offline' -
+#                ViaProxy is what needs to hold a real account for the
+#                *upstream* connection to an online-mode server, so AUTH here
+#                instead picks ViaProxy's auth-method: 'offline' (default) ->
+#                auth-method NONE (an offline/cracked, or already-unauthenticated,
+#                target server); 'microsoft' -> auth-method ACCOUNT, and this
+#                script drives ViaProxy's one-time interactive account setup
+#                (a Microsoft device-code login: it prints a URL + code to
+#                open in a browser) the first time, then reuses the saved
+#                account (azalea-bot/viaproxy/saves.json) on every run after.
 
 set -euo pipefail
 
@@ -35,6 +45,43 @@ VIAPROXY_PORT=25568
 
 log() { printf '[run_bot.sh] %s\n' "$*"; }
 die() { printf '[run_bot.sh] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Whether azalea-bot/viaproxy/saves.json already has at least one saved
+# ViaProxy account (any type - offline/microsoft/bedrock).
+viaproxy_has_saved_account() {
+    "$PY" -c "
+import json, sys
+try:
+    with open('$VIAPROXY_DIR/saves.json') as f:
+        accounts = json.load(f).get('accountsV4', [])
+except (OSError, ValueError):
+    accounts = []
+sys.exit(0 if accounts else 1)
+" 2>/dev/null
+}
+
+# Drives ViaProxy's own interactive CLI ('account add microsoft') so the
+# upstream (real-server) connection can authenticate as a real Microsoft
+# account - the piece that used to require hand-editing viaproxy.yml plus
+# knowing ViaProxy's own account UI/CLI. Idempotent: a no-op once an account
+# is already saved. The device-code login itself can't be scripted away (it's
+# Microsoft's own OAuth flow - a human has to open the URL and sign in), so
+# this only removes everything *around* that one unavoidable step.
+ensure_viaproxy_microsoft_account() {
+    viaproxy_has_saved_account && return 0
+    log "No saved ViaProxy account yet - starting its one-time Microsoft login."
+    log "A device code + URL will be printed below; open the URL in a browser and sign in with"
+    log "the Microsoft account you want the bot to connect as. This only has to be done once -"
+    log "the saved login (azalea-bot/viaproxy/saves.json) is reused on every run after."
+    # ViaProxy's CLI console reads one command per line from stdin; the
+    # 'account add microsoft' handler blocks until the login finishes (or
+    # times out) before the console reads the next line, so 'stop' - already
+    # sitting in the pipe - only runs after that. Foreground (inherits this
+    # script's stdout) so the code/URL and any errors are visible live.
+    ( cd "$VIAPROXY_DIR" && printf 'account add microsoft\nstop\n' | java -jar "$JAR" cli )
+    viaproxy_has_saved_account || die "ViaProxy still has no saved account after the login attempt - see the output above and try again"
+    log "ViaProxy account saved."
+}
 
 # Check dependencies
 command -v cargo  >/dev/null 2>&1 || die "cargo not found - install Rust: https://rustup.rs"
@@ -116,11 +163,22 @@ if [ -n "$MC_VERSION" ]; then
         curl -fsSL -o "$JAR" "$URL" || die "ViaProxy download failed ($URL)"
     fi
     # ViaProxy reads viaproxy.yml from its working dir when run headless.
+    # AUTH=microsoft -> ViaProxy itself authenticates upstream as a real
+    # account (auth-method ACCOUNT, index 0 - the only account this script
+    # ever adds); AUTH=offline (default) -> unauthenticated upstream, as
+    # before (auth-method NONE).
+    if [ "$AUTH" = "microsoft" ]; then
+        ensure_viaproxy_microsoft_account
+        VIAPROXY_AUTH_LINES="auth-method: ACCOUNT
+minecraft-account-index: 0"
+    else
+        VIAPROXY_AUTH_LINES="auth-method: NONE"
+    fi
     cat > "$VIAPROXY_DIR/viaproxy.yml" <<EOF
 bind-address: 127.0.0.1:$VIAPROXY_PORT
 target-address: $SERVER_ADDR
 target-version: $MC_VERSION
-auth-method: NONE
+$VIAPROXY_AUTH_LINES
 proxy-online-mode: false
 EOF
     log "Starting ViaProxy: $SERVER_ADDR ($MC_VERSION) -> 127.0.0.1:$VIAPROXY_PORT"
@@ -135,9 +193,14 @@ EOF
     port_open "$VIAPROXY_PORT" || { cat "$VIAPROXY_DIR/viaproxy.log" >&2; die "ViaProxy did not open $VIAPROXY_PORT within 30s"; }
     log "ViaProxy is up."
     SERVER_ADDR="127.0.0.1:$VIAPROXY_PORT"
+    # The bot itself always talks to the *local*, unauthenticated ViaProxy -
+    # AUTH picked ViaProxy's own upstream auth-method above, not the bot's.
+    BOT_AUTH="offline"
+else
+    BOT_AUTH="$AUTH"
 fi
 
 # 4. Connect the bot
-log "Connecting the bot to $SERVER_ADDR as '$USERNAME' (auth: $AUTH)..."
+log "Connecting the bot to $SERVER_ADDR as '$USERNAME' (auth: $BOT_AUTH)..."
 cd "$BOT_DIR"
-cargo run --release -- "$SERVER_ADDR" "$USERNAME" "$INFERENCE_URL" --auth "$AUTH"
+cargo run --release -- "$SERVER_ADDR" "$USERNAME" "$INFERENCE_URL" --auth "$BOT_AUTH"
