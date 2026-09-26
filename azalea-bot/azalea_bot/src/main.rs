@@ -176,10 +176,11 @@ struct Consts {
     /// `mod inference` and the `Event::Tick` handler for how the bot keeps
     /// that history and feeds it to `/act`.
     frame_stack: usize,
-    /// LSTM hidden width if this policy has a recurrent head (spec.json's
-    /// `arch.lstm_hidden`), else 0. The bot carries `(h, c)` between `/act`
-    /// calls (see `State::lstm_state`) rather than the server keeping any
-    /// per-bot session state.
+    /// `0` for the default memoryless MLP policy. `> 0` for an `--lstm`
+    /// checkpoint: the width of the `(h, c)` state `mod inference` then
+    /// carries between ticks and threads through every `/act` call (see
+    /// `LstmState` and `inference::run_worker`). From `spec.json`'s
+    /// `arch.lstm_hidden`.
     lstm_hidden: usize,
 }
 
@@ -253,7 +254,7 @@ struct Spec {
 #[derive(Debug, Default, Deserialize)]
 struct SpecArch {
     #[serde(default)]
-    lstm_hidden: Option<usize>,
+    lstm_hidden: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -304,7 +305,7 @@ impl Spec {
                 _ => InputOrder::Legacy,
             },
             frame_stack: self.frame_stack.unwrap_or(d.frame_stack).max(1),
-            lstm_hidden: self.arch.lstm_hidden.unwrap_or(d.lstm_hidden),
+            lstm_hidden: self.arch.lstm_hidden,
         }
     }
 }
@@ -346,16 +347,17 @@ struct State {
     /// zeroing a slot's stack on every new episode. No-op when
     /// `consts.frame_stack <= 1`.
     frame_history: Arc<Mutex<VecDeque<Observation>>>,
-    /// Carried LSTM `(h, c)` for a recurrent policy (`consts.lstm_hidden >
-    /// 0`), threaded through `/act` each tick and updated from the
-    /// response. Zeroed on respawn. Empty (and never sent) for a
-    /// memoryless policy.
-    lstm_state: Arc<Mutex<(Vec<f32>, Vec<f32>)>>,
     /// Whether `apply_action` currently has a `start_mining` in flight -
     /// tracked so it only fires `StopMiningBlockEvent` on the falling edge.
     /// That event's handler unconditionally unwraps the mine-target
     /// component, so sending it while nothing is being mined panics the ECS.
     is_mining: Arc<std::sync::atomic::AtomicBool>,
+    /// Bumped on `Event::Death` - the closest thing this bot has to a
+    /// training-side episode boundary. The inference worker (`mod
+    /// inference`) watches this to zero its carried LSTM `(h, c)` state for
+    /// a recurrent (`--lstm`) policy. A no-op for the default memoryless
+    /// MLP policy.
+    episode_gen: Arc<AtomicU64>,
 }
 
 impl Default for State {
@@ -374,8 +376,8 @@ impl Default for State {
             my_id: Arc::new(Mutex::new(None)),
             last_hotkey_tick: Arc::new(AtomicU64::new(0)),
             frame_history: Arc::new(Mutex::new(VecDeque::new())),
-            lstm_state: Arc::new(Mutex::new((Vec::new(), Vec::new()))),
             is_mining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            episode_gen: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -400,12 +402,22 @@ pub(crate) struct Action {
     /// `sim/src/kit.rs::HOTBAR_ACTION_DIM`).
     #[serde(default)]
     pub held_slot: i64,
-    /// Updated recurrent state from a `--lstm` policy (see `Consts::lstm_hidden`),
-    /// carried into the *next* `/act` call. `None` for a memoryless policy.
+    /// Only present for a recurrent (`--lstm`) policy (`consts.lstm_hidden >
+    /// 0`) - see `inference_server.py`'s module docstring. `mod inference`
+    /// carries this straight into the next `/act` request's `lstm_state`
+    /// and never reads its contents itself.
     #[serde(default)]
-    pub lstm_h: Option<Vec<f32>>,
-    #[serde(default)]
-    pub lstm_c: Option<Vec<f32>>,
+    pub lstm_state: Option<LstmState>,
+}
+
+/// An LSTM `(h, c)` state, opaque to this bot - it only ever round-trips it
+/// between `/act` responses and the next `/act` request, zeroed (by
+/// omitting it) at episode start. See `inference_server.py`'s `lstm_state`
+/// wire contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct LstmState {
+    h: Vec<f32>,
+    c: Vec<f32>,
 }
 
 /// One nearby player block, mirroring `OtherPlayer` in sim/src/protocol.rs.
@@ -642,7 +654,12 @@ async fn main() -> eyre::Result<()> {
         Consts::default()
     });
     info!("observation constants: {consts:?}");
-    let lstm_hidden = consts.lstm_hidden;
+    if consts.lstm_hidden > 0 {
+        info!(
+            "recurrent policy (lstm_hidden={}) - carrying LSTM state between ticks, reset on death",
+            consts.lstm_hidden
+        );
+    }
 
     let guard_cfg = GuardConfig::from_env();
     info!("legality guard: {guard_cfg:?}");
@@ -650,11 +667,13 @@ async fn main() -> eyre::Result<()> {
     let (obs_tx, obs_rx) = watch::channel::<Option<inference::ObsPacket>>(None);
     let action = ActionCell::default();
     let act_url = Arc::new(inference_url);
+    let episode_gen = Arc::new(AtomicU64::new(0));
     tokio::spawn(inference::run_worker(
         http.clone(),
         act_url.clone(),
         obs_rx,
         action.clone(),
+        episode_gen.clone(),
     ));
 
     let state = State {
@@ -668,8 +687,8 @@ async fn main() -> eyre::Result<()> {
         my_id: Arc::new(Mutex::new(None)),
         last_hotkey_tick: Arc::new(AtomicU64::new(0)),
         frame_history: Arc::new(Mutex::new(VecDeque::new())),
-        lstm_state: Arc::new(Mutex::new((vec![0.0; lstm_hidden], vec![0.0; lstm_hidden]))),
         is_mining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        episode_gen,
     };
 
     let account = match cli.auth {
@@ -732,21 +751,18 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             let tick = state.ticks.fetch_add(1, Ordering::Relaxed);
 
             // 1. publish this tick's observation for the async worker, along
-            //    with whatever frame-stack history / LSTM state this
-            //    policy needs (both no-ops for a plain memoryless policy).
+            //    with whatever frame-stack history this
+            //    policy needs (a no-op for a plain memoryless policy).
             if let Some(observation) = build_observation(&bot, &state) {
                 let prev_frames = if state.consts.frame_stack > 1 {
                     state.frame_history.lock().unwrap().iter().cloned().collect()
                 } else {
                     Vec::new()
                 };
-                let lstm = (state.consts.lstm_hidden > 0)
-                    .then(|| state.lstm_state.lock().unwrap().clone());
                 state.obs_tx.send_replace(Some(inference::ObsPacket {
                     tick,
                     obs: observation.clone(),
                     prev_frames,
-                    lstm,
                 }));
 
                 if state.consts.frame_stack > 1 {
@@ -764,9 +780,6 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                     warn!(
                         "inference is {staleness} ticks behind - is the model server keeping up?"
                     );
-                }
-                if let (Some(h), Some(c)) = (&decision.action.lstm_h, &decision.action.lstm_c) {
-                    *state.lstm_state.lock().unwrap() = (h.clone(), c.clone());
                 }
                 let (_, _, _, _, held_id) = read_inventory(&bot);
                 let held_is_mining_tool = Item::from_id(held_id).is_mining_tool();
@@ -791,12 +804,11 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             *state.look.lock().unwrap() = (0.0, 0.0);
             state.guard.lock().unwrap().on_respawn();
             state.frame_history.lock().unwrap().clear();
-            {
-                let mut lstm = state.lstm_state.lock().unwrap();
-                lstm.0.iter_mut().for_each(|v| *v = 0.0);
-                lstm.1.iter_mut().for_each(|v| *v = 0.0);
-            }
-            info!("died - respawning automatically, reset tracked look direction");
+            // Same episode boundary the sim zeros a recurrent policy's LSTM
+            // state at (see `State::episode_gen`'s doc comment) - a no-op
+            // for the default non-recurrent policy.
+            state.episode_gen.fetch_add(1, Ordering::Relaxed);
+            info!("died - respawning automatically, reset tracked look direction + LSTM state");
         }
         Event::Disconnect(reason) => {
             // The server dropped us - a kick (anticheat, whitelist, a

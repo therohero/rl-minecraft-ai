@@ -21,9 +21,11 @@ then asserts on the run's own log output + the files it left behind:
   6. a `--terrain-curriculum-updates` run ramps the terrain amplitude up
      via mid-run sim relaunches and completes;
   7. an `--lstm` (recurrent head) run trains, resumes, and evaluates; a head
-     mismatch on resume is rejected and `export_model.py` now exports it
-     (live recurrent inference); combining `--lstm` with `--frame-stack` is
-     still refused at export (untested live interaction);
+     mismatch on resume is rejected, and `export_model.py` exports the
+     recurrent checkpoint for live play (see tests/test_inference_server.py
+     for the `/act` `lstm_state` wire contract that export feeds); combining
+     `--lstm` with `--frame-stack` is still refused at export (untested live
+     interaction);
   8. a `--pipeline-rollout` run (background-thread rollout collection
      overlapped with the PPO update) trains, resumes, and survives a
      terrain-curriculum sim relaunch mid-run without desyncing or hanging.
@@ -253,7 +255,7 @@ def main() -> int:
         print("      ok: terrain amplitude ramps up via sim relaunches, run completes")
 
         lstm_ckpt = os.path.join(tmp, "lstm")
-        print(f"[7/8] LSTM run: --lstm fresh + resume + eval + export refusal -> {lstm_ckpt}")
+        print(f"[7/8] LSTM run: --lstm fresh + resume + eval + live export -> {lstm_ckpt}")
         ls1 = _run_training(sim_binary, lstm_ckpt, 4, fresh=True, extra=["--lstm", "--lstm-hidden", "16"])
         _require("head=lstm(16)" in ls1, "train.py did not report the recurrent head", ls1)
         _require(_last_update_in_log(ls1) == 4, f"lstm run stopped early: {_last_update_in_log(ls1)}", ls1)
@@ -273,17 +275,19 @@ def main() -> int:
 
         _run_eval(sim_binary, lstm_ckpt)
         ls_exp = _run_export(os.path.join(lstm_ckpt, "latest.pt"))
-        _require(ls_exp.returncode == 0, "export_model.py should export a recurrent checkpoint now that "
-                 "live LSTM inference exists", ls_exp.stdout + ls_exp.stderr)
-        with open(os.path.join(tmp, "lstm", "model", "spec.json")) as f:
-            ls_spec = json.load(f)
-        _require(ls_spec.get("arch", {}).get("lstm_hidden") == 16,
-                 f"spec.json arch.lstm_hidden={ls_spec.get('arch', {}).get('lstm_hidden')}, expected 16",
+        _require(ls_exp.returncode == 0,
+                 "export_model.py should export a recurrent checkpoint for live play",
                  ls_exp.stdout + ls_exp.stderr)
-        _require("lstm_h" in ls_spec.get("policy_outputs", []),
-                 "spec.json policy_outputs should list lstm_h/lstm_c for a recurrent export", ls_exp.stdout)
-        print("      ok: LSTM head trains, resumes, evaluates, exports for live play (spec lstm_hidden=16)")
-        print("      ok: head mismatch on resume still rejected")
+        ls_spec_path = os.path.join(lstm_ckpt, "model", "spec.json")
+        with open(ls_spec_path) as f:
+            ls_spec = json.load(f)
+        _require(ls_spec["arch"]["lstm_hidden"] == 16,
+                 f"exported spec.json has the wrong lstm_hidden: {ls_spec['arch']}", ls_exp.stdout)
+        _require("lstm_h" in ls_spec["policy_outputs"] and "lstm_c" in ls_spec["policy_outputs"],
+                 f"exported spec.json policy_outputs missing lstm_h/lstm_c: {ls_spec['policy_outputs']}",
+                 ls_exp.stdout)
+        print("      ok: LSTM head trains, resumes, evaluates; head mismatch rejected, live export "
+              "succeeds (see tests/test_inference_server.py for the /act round-trip)")
 
         both_ckpt = os.path.join(tmp, "both")
         both = _run_training(sim_binary, both_ckpt, 2, fresh=True,

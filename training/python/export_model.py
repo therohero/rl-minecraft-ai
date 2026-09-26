@@ -3,15 +3,21 @@ loaded outside this repo (e.g. by azalea-bot/inference_server.py) to play
 live against the trained bot.
 
 Produces, in --out-dir:
-  policy.pt      - TorchScript module, `forward(obs: Tensor[N, OBS_DIM]) ->
-                   (cont_mean: Tensor[N, 4], cont_std: Tensor[N, 4],
-                    binary_probs: Tensor[N, 5], slot_probs: Tensor[N, S])`.
-                   `cont_mean` is the raw pre-tanh continuous action mean and
-                   `cont_std` its learned per-dim std - the inference server
-                   tanh-squashes the mean for deterministic play, or samples
-                   `tanh(mean + std * randn)` when run with `--sample` so a
-                   live duel can use the trained policy's full distribution
-                   instead of only its mode.
+  policy.pt      - TorchScript module. For an MLP checkpoint (the default),
+                   `forward(obs: Tensor[N, OBS_DIM]) -> (cont_mean, cont_std,
+                   binary_probs, slot_probs)`. For an `--lstm` checkpoint,
+                   `forward(obs: Tensor[1, OBS_DIM], h: Tensor[1, 1,
+                   lstm_hidden], c: Tensor[1, 1, lstm_hidden]) -> (cont_mean,
+                   cont_std, binary_probs, slot_probs, h_out, c_out)` - the
+                   caller (the live bridge) owns and carries `(h, c)` between
+                   ticks; see spec.json's `arch.lstm_hidden` and
+                   azalea-bot/inference_server.py's `lstm_state` request/
+                   response field. `cont_mean` is the raw pre-tanh continuous
+                   action mean and `cont_std` its learned per-dim std - the
+                   inference server tanh-squashes the mean for deterministic
+                   play, or samples `tanh(mean + std * randn)` when run with
+                   `--sample` so a live duel can use the trained policy's
+                   full distribution instead of only its mode.
   spec.json      - obs/action field order + constants, so any downstream
                    consumer (even a non-Python bot) knows how to build the
                    observation vector and interpret the action output.
@@ -58,13 +64,14 @@ class InferencePolicy(nn.Module):
         return mean, cont_std, binary_probs, slot_probs
 
 
-class InferencePolicyRecurrent(nn.Module):
-    """`InferencePolicy` for a `--lstm` checkpoint: a live bot has no
-    training-loop rollout buffer to carry state in, so unlike training this
-    module takes the incoming `(h, c)` as real inputs and returns the
-    updated pair as real outputs - the caller (inference_server.py) threads
-    them through unchanged from one `/act` call to the next, keyed per bot,
-    zeroed at match start (see azalea-bot/README.md, mod/README.md)."""
+class InferenceRecurrentPolicy(nn.Module):
+    """Same as `InferencePolicy`, but for an `--lstm` checkpoint: the traced
+    module is otherwise stateless between calls, so the caller passes in the
+    LSTM `(h, c)` state from the previous tick and gets the updated state
+    back to carry into the next one - one persistent `(h, c)` per live bot,
+    zeroed at episode/match start (see azalea_bot's `Event::Death` handler
+    and the mod's fight-start reset).
+    """
 
     def __init__(self, actor_critic: ActorCritic):
         super().__init__()
@@ -134,7 +141,7 @@ def main():
     model.eval()
 
     if lstm_hidden:
-        wrapped = InferencePolicyRecurrent(model)
+        wrapped = InferenceRecurrentPolicy(model)
         example_input = (
             torch.zeros(1, obs_dim),
             torch.zeros(1, 1, lstm_hidden),
@@ -150,7 +157,7 @@ def main():
     # a different machine / torch build, possibly months later). torch.export's
     # `.pt2` serialization makes no such cross-version guarantee yet. Revisit
     # when it does. The policy is a plain feed-forward net (Linear/Tanh/
-    # sigmoid/softmax[/LSTM cell]), so a trace is exact.
+    # sigmoid/softmax [/ LSTM]), so a trace is exact.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=r"`torch\.jit\..*` is deprecated")
         scripted = torch.jit.trace(wrapped, example_input)

@@ -807,8 +807,7 @@ mod tests {
             use_item: false,
             sneak: false,
             held_slot: 0,
-            lstm_h: None,
-            lstm_c: None,
+            lstm_state: None,
         }
     }
 }

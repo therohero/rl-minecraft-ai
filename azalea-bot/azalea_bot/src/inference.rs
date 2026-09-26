@@ -15,6 +15,7 @@
 //! inference latency, at the cost of the action being at most one
 //! round-trip stale (which the tick handler tracks and warns about).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,12 +23,12 @@ use log::{info, warn};
 use serde::Serialize;
 use tokio::sync::watch;
 
-use crate::{Action, Observation};
+use crate::{Action, LstmState, Observation};
 
 /// Everything one `/act` round-trip needs, snapshotted from `State` the
-/// moment the tick's observation was built - live frame-stack history and
-/// carried LSTM state, both no-ops for a plain memoryless policy (see
-/// `Consts::frame_stack` / `Consts::lstm_hidden` in `main.rs`).
+/// moment the tick's observation was built - live frame-stack history, a
+/// no-op for a plain memoryless policy (see `Consts::frame_stack` in
+/// `main.rs`). The carried LSTM state lives in `run_worker`, not here.
 #[derive(Clone)]
 pub(crate) struct ObsPacket {
     pub tick: u64,
@@ -36,8 +37,6 @@ pub(crate) struct ObsPacket {
     /// the start of a life / just after a respawn - the server zero-pads
     /// the rest, mirroring `training/python/frame_stack.py::reset`).
     pub prev_frames: Vec<Observation>,
-    /// Carried recurrent `(h, c)`, `Some` only for an `--lstm` policy.
-    pub lstm: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 /// An action together with the tick whose observation produced it, so the
@@ -68,13 +67,24 @@ pub(crate) type ObsSender = watch::Sender<Option<ObsPacket>>;
 pub(crate) type ObsReceiver = watch::Receiver<Option<ObsPacket>>;
 
 /// Runs until the observation channel closes (i.e. the client shut down).
+///
+/// For a recurrent (`--lstm`) policy, this loop is also where the carried
+/// `(h, c)` state lives: it processes one observation at a time, in order,
+/// so a plain local variable is enough - no extra synchronisation needed.
+/// `episode_gen` is watched each iteration so the state gets zeroed at the
+/// same point training does (see `State::episode_gen`'s doc comment); for
+/// the default non-recurrent policy `lstm_state` just stays `None` and is
+/// never sent.
 pub(crate) async fn run_worker(
     http: reqwest::Client,
     act_url: Arc<String>,
     mut obs_rx: ObsReceiver,
     out: ActionCell,
+    episode_gen: Arc<AtomicU64>,
 ) {
     let mut stats = RoundTripStats::new();
+    let mut lstm_state: Option<LstmState> = None;
+    let mut last_gen = episode_gen.load(Ordering::Relaxed);
     loop {
         if obs_rx.changed().await.is_err() {
             break; // every sender dropped - client is gone
@@ -84,12 +94,25 @@ pub(crate) async fn run_worker(
             continue;
         };
         let tick = packet.tick;
+
+        let gen = episode_gen.load(Ordering::Relaxed);
+        if gen != last_gen {
+            lstm_state = None;
+            last_gen = gen;
+        }
+
         let started = Instant::now();
-        match fetch_action(&http, &act_url, &packet).await {
+        match fetch_action(&http, &act_url, &packet, lstm_state.clone()).await {
             Ok(action) => {
                 stats.record(started.elapsed());
+                // Carried into the next request whether or not this
+                // checkpoint is recurrent - `None` stays `None`.
+                lstm_state = action.lstm_state.clone();
                 out.store(Decision { obs_tick: tick, action });
             }
+            // Keep the last known state on a failed request (rather than
+            // dropping to zeroed) and just retry with it next tick - same
+            // "hold the last decision" spirit as the action itself below.
             Err(e) => warn!("inference request failed ({e}); holding last action"),
         }
     }
@@ -148,40 +171,97 @@ impl RoundTripStats {
 /// The `/act` request body: this tick's observation flattened at the top
 /// level (unchanged from before frame-stacking/LSTM existed - a plain
 /// memoryless policy's client is unaffected byte-for-byte), plus additive
-/// optional fields a server that knows about them can use. `observation_to_row`
-/// (`training/python/features.py`) only ever reads known keys, so an older
-/// server ignoring these is exactly as compatible as one that understands
-/// them - and a client never needs to send them for a `frame_stack`-1,
-/// non-recurrent policy.
+/// optional fields a server that knows about them can use: `prev_frames`
+/// (live frame stacking, omitted when empty) and, only when non-`None`, a
+/// top-level `lstm_state` - matches `inference_server.py`'s contract (an
+/// absent/`null` `lstm_state` there means "start from zeroed"). Generic
+/// over the flattened type so the wire shape (flatten + skip-if-none) is
+/// unit-testable without a real, ~40-field `Observation` (see `tests`
+/// below); `fetch_action` always instantiates it as
+/// `ActRequest<'_, Observation>`.
 #[derive(Serialize)]
-struct ActRequest<'a> {
+struct ActRequest<'a, O: Serialize> {
     #[serde(flatten)]
-    obs: &'a Observation,
+    obs: &'a O,
+    #[serde(skip_serializing_if = "<[Observation]>::is_empty")]
     prev_frames: &'a [Observation],
     #[serde(skip_serializing_if = "Option::is_none")]
-    lstm_h: Option<&'a [f32]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lstm_c: Option<&'a [f32]>,
+    lstm_state: Option<LstmState>,
 }
 
 async fn fetch_action(
     http: &reqwest::Client,
     act_url: &str,
     packet: &ObsPacket,
+    lstm_state: Option<LstmState>,
 ) -> eyre::Result<Action> {
-    let req = ActRequest {
-        obs: &packet.obs,
-        prev_frames: &packet.prev_frames,
-        lstm_h: packet.lstm.as_ref().map(|(h, _)| h.as_slice()),
-        lstm_c: packet.lstm.as_ref().map(|(_, c)| c.as_slice()),
-    };
+    let body = ActRequest { obs: &packet.obs, prev_frames: &packet.prev_frames, lstm_state };
     let action = http
         .post(act_url)
-        .json(&req)
+        .json(&body)
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
     Ok(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct FakeObs {
+        a: i32,
+        b: bool,
+    }
+
+    #[test]
+    fn act_request_omits_lstm_state_when_none() {
+        let obs = FakeObs { a: 1, b: true };
+        let req = ActRequest { obs: &obs, prev_frames: &[], lstm_state: None };
+        let v = serde_json::to_value(&req).unwrap();
+        // No `lstm_state` key at all - the non-recurrent wire shape must be
+        // byte-for-byte what inference_server.py expected before lstm_state
+        // existed.
+        assert_eq!(v, serde_json::json!({"a": 1, "b": true}));
+    }
+
+    #[test]
+    fn act_request_flattens_obs_and_includes_lstm_state_when_present() {
+        // Exact in f32 (and so in the f64 JSON round-trip) - avoids a
+        // binary-precision mismatch unrelated to what this test checks.
+        let obs = FakeObs { a: 1, b: true };
+        let state = LstmState { h: vec![0.5, 0.25], c: vec![-1.5, 2.0] };
+        let req = ActRequest { obs: &obs, prev_frames: &[], lstm_state: Some(state) };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], true);
+        assert_eq!(v["lstm_state"]["h"], serde_json::json!([0.5, 0.25]));
+        assert_eq!(v["lstm_state"]["c"], serde_json::json!([-1.5, 2.0]));
+    }
+
+    fn min_action_json() -> serde_json::Value {
+        serde_json::json!({
+            "move_x": 0.0, "move_z": 0.0, "yaw_delta": 0.0, "pitch_delta": 0.0,
+            "jump": false, "attack": false, "sprint": false
+        })
+    }
+
+    #[test]
+    fn action_deserializes_without_lstm_state() {
+        let a: Action = serde_json::from_value(min_action_json()).unwrap();
+        assert!(a.lstm_state.is_none());
+    }
+
+    #[test]
+    fn action_deserializes_with_lstm_state() {
+        let mut json = min_action_json();
+        json["lstm_state"] = serde_json::json!({"h": [1.0, 2.0], "c": [3.0]});
+        let a: Action = serde_json::from_value(json).unwrap();
+        let state = a.lstm_state.expect("lstm_state should have parsed");
+        assert_eq!(state.h, vec![1.0, 2.0]);
+        assert_eq!(state.c, vec![3.0]);
+    }
 }

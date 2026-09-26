@@ -25,22 +25,40 @@ field-for-field, since that's what the policy was trained on. Your bot
 integration is responsible for computing those fields (positions,
 velocities, relative opponent position, HP, etc.) from the real game.
 
-Live frame stacking / recurrent (--lstm) policies: this server is
+Live frame stacking: this server is
 otherwise stateless (any bot can call it, no session/identity), so the
 *client* carries whatever history a policy needs and sends it along each
-request rather than the server keeping per-bot state:
+request rather than the server keeping per-bot state (recurrent state: see
+below):
   - `frame_stack` > 1 (spec.json): the request may add a `prev_frames` key -
     a JSON array of up to `frame_stack - 1` older observation dicts,
     newest first. Fewer than that (e.g. right after connecting) is fine -
     missing history is zero-padded, exactly like a fresh training episode.
-  - a recurrent (`--lstm`) policy (spec.json's `arch.lstm_hidden` > 0): the
-    request may add `lstm_h` / `lstm_c` (flat float arrays of that width,
-    the carried hidden state) and the response then includes updated
-    `lstm_h` / `lstm_c` for the client to send back next call. Omitted /
-    absent on the first call - treated as all-zero, the same as a fresh
-    sim episode.
-Both are additive - a plain JSON body without these keys behaves exactly
-as it always has for a `frame_stack=1`, non-recurrent policy.
+
+## Recurrent (`--lstm`) checkpoints
+
+This server is otherwise stateless - no per-bot session, no bot identity in
+the request - so a checkpoint trained with `--lstm` (see spec.json's
+`arch.lstm_hidden`; 0 for the default memoryless MLP) makes the *caller*
+carry the recurrent state between ticks instead:
+
+    POST /act
+    { ...observation fields..., "lstm_state": {"h": [8 floats], "c": [8 floats]} }
+  -> { ...action fields..., "lstm_state": {"h": [8 floats], "c": [8 floats]} }
+
+Store the `lstm_state` object from each response and send it back as-is on
+the bot's next `/act` call. Omit `lstm_state` (or send `null`) to start from
+a zeroed state - do this once at the start of each match/episode, the same
+point the sim zeros it during training (see ppo_agent.py's `zero_hidden`).
+A stale state from a different bot or a different checkpoint's
+`lstm_hidden` width is silently treated as absent (zeroed) rather than
+erroring, since a garbled hidden state degrades gracefully - the policy
+just starts memory-less that tick - while erroring on it would need the
+caller to track its own `lstm_hidden` just to avoid a 400. For a non-
+recurrent checkpoint (`lstm_hidden` 0), `lstm_state` is not read or
+returned at all - the request/response shape is exactly as above.
+The two combine freely in the JSON body (`prev_frames` + `lstm_state`); the
+binary body below has no defined layout for either.
 
 Optional binary `/act` body: POST with `Content-Type: application/octet-stream`
 and the body is the raw little-endian float32 wire row
@@ -117,6 +135,10 @@ class PolicyHandler(BaseHTTPRequestHandler):
     spec = None
     device = None
     model_dir = None
+    # 0 for a plain MLP checkpoint (the common case - no lstm_state in the
+    # wire contract at all); > 0 for an --lstm checkpoint, set from
+    # spec.json's arch.lstm_hidden at load time (and again on a hot reload).
+    lstm_hidden = 0
     # When True, sample every action head from the trained policy's
     # distribution (tanh(mean + std*temp*noise), Bernoulli on the binary
     # heads, temperature-scaled categorical on the slot head) instead of
@@ -170,6 +192,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 return
             features.configure(**spec.get("sim_constants", {}))
             cls.policy, cls.spec, cls._policy_mtime = policy, spec, new_mtime
+            cls.lstm_hidden = (spec.get("arch") or {}).get("lstm_hidden", 0)
             log.info("hot-reloaded %s (trained_updates=%s)", cls.model_dir, spec.get("trained_updates"))
 
     def do_GET(self):
@@ -208,7 +231,6 @@ class PolicyHandler(BaseHTTPRequestHandler):
     def _handle_json_act(self, raw_body: bytes):
         body = json.loads(raw_body)
         frame_stack = int(self.spec.get("frame_stack", 1))
-        lstm_hidden = int((self.spec.get("arch") or {}).get("lstm_hidden", 0))
 
         obs_vec = observation_to_vector(body)
         if frame_stack > 1:
@@ -225,16 +247,15 @@ class PolicyHandler(BaseHTTPRequestHandler):
 
         with torch.no_grad():
             obs_tensor = torch.as_tensor(obs_vec).unsqueeze(0).to(self.device)
-            if lstm_hidden:
-                h = self._lstm_tensor(body.get("lstm_h"), lstm_hidden)
-                c = self._lstm_tensor(body.get("lstm_c"), lstm_hidden)
-                cont_mean, cont_std, binary_probs, slot_probs, new_h, new_c = self.policy(
-                    obs_tensor, h, c
+            if self.lstm_hidden:
+                h_in, c_in = self._read_lstm_state(body.get("lstm_state"))
+                cont_mean, cont_std, binary_probs, slot_probs, h_out, c_out = self.policy(
+                    obs_tensor, h_in, c_in
                 )
-                lstm_out = (
-                    new_h[0, 0].cpu().tolist(),
-                    new_c[0, 0].cpu().tolist(),
-                )
+                lstm_out = {
+                    "h": h_out.reshape(-1).cpu().tolist(),
+                    "c": c_out.reshape(-1).cpu().tolist(),
+                }
             else:
                 cont_mean, cont_std, binary_probs, slot_probs = self.policy(obs_tensor)
                 lstm_out = None
@@ -259,7 +280,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
             "held_slot": held_slot,
         }
         if lstm_out is not None:
-            response["lstm_h"], response["lstm_c"] = lstm_out
+            response["lstm_state"] = lstm_out
         self._send_json(200, response)
 
     def _handle_binary_act(self, raw_body: bytes):
@@ -270,7 +291,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 400,
                 {
                     "error": "the binary /act body only supports a frame_stack=1, non-recurrent "
-                    "policy - use the JSON body (with prev_frames / lstm_h / lstm_c) for this one"
+                    "policy - use the JSON body (with prev_frames / lstm_state) for this one"
                 },
             )
             return
@@ -315,15 +336,28 @@ class PolicyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _lstm_tensor(self, values, lstm_hidden: int) -> torch.Tensor:
-        """A request's `lstm_h`/`lstm_c` (a flat list, or absent/None on the
-        first call) -> the `[1, 1, lstm_hidden]` tensor the traced recurrent
-        module expects."""
-        if values is None:
-            values = [0.0] * lstm_hidden
-        elif len(values) != lstm_hidden:
-            raise ValueError(f"lstm_h/lstm_c had {len(values)} floats, expected {lstm_hidden}")
-        return torch.as_tensor(values, dtype=torch.float32).view(1, 1, lstm_hidden).to(self.device)
+    def _read_lstm_state(self, raw) -> tuple[torch.Tensor, torch.Tensor]:
+        """Parses the request's `lstm_state`, or a zeroed `(h, c)` if it's
+        absent, malformed, or the wrong width for this checkpoint - see the
+        module docstring on why a bad state degrades to zeroed rather than
+        a 400."""
+        n = self.lstm_hidden
+        if isinstance(raw, dict):
+            h_list, c_list = raw.get("h"), raw.get("c")
+            if (
+                isinstance(h_list, list) and isinstance(c_list, list)
+                and len(h_list) == n and len(c_list) == n
+            ):
+                try:
+                    h = torch.tensor(h_list, dtype=torch.float32).view(1, 1, n).to(self.device)
+                    c = torch.tensor(c_list, dtype=torch.float32).view(1, 1, n).to(self.device)
+                    return h, c
+                except (TypeError, ValueError):
+                    pass
+        return (
+            torch.zeros(1, 1, n, device=self.device),
+            torch.zeros(1, 1, n, device=self.device),
+        )
 
     def _select_action(self, cont_mean, cont_std, binary_probs, slot_probs):
         """Deterministic mode, or (with `--sample`) a draw from the trained
@@ -399,11 +433,18 @@ def main():
     PolicyHandler.policy = policy
     PolicyHandler.spec = spec
     PolicyHandler._policy_mtime = mtime
+    PolicyHandler.lstm_hidden = (spec.get("arch") or {}).get("lstm_hidden", 0)
 
     # Normalize incoming observations exactly the way the policy was trained
     # to expect - spec.json carries the sim constants that run used.
     features.configure(**PolicyHandler.spec.get("sim_constants", {}))
     log.info("observation normalization: %s", features.active_constants())
+    if PolicyHandler.lstm_hidden:
+        log.info(
+            "recurrent policy (lstm_hidden=%d) - callers must carry lstm_state between ticks, "
+            "zeroed at the start of each match/episode",
+            PolicyHandler.lstm_hidden,
+        )
 
     # `kill -HUP <pid>` forces a hot-reload on the next request even without
     # a newer file mtime to notice (see `PolicyHandler.maybe_reload`).

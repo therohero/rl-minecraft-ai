@@ -23,16 +23,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   `place_reach` exactly - see azalea-bot/README.md), but never checked
   against a real server.
 
-## Sim fidelity (`training/sim/`)
-
-- [ ] **Non-full blocks.** No slabs/stairs, so the 0.6 step-up never fires on
-  terrain. Low priority. Add them, but no kit places/carries them by default.
-
-## Tooling / infra
-
-- [ ] **`torch.export` migration.** `export_model.py` uses TorchScript because
-  its on-disk format is stable across torch versions; revisit `.pt2` once it
-  makes the same cross-version guarantee.
 ## Mod (`mod/`)
 
 - [ ] **Bring the mod's live bridge up to parity with `azalea_bot`.**
@@ -59,3 +49,10 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   dummies have no server entity). Add a headless second `azalea` bot (or a
   server-side fake player) so `cps_within_cap` and the win/loss outcome
   assertions become real, then the `mod/` self-merge gate can rely on them.
+  A real in-fight episode boundary (kill/death/disengage) also unlocks
+  testing an `--lstm` checkpoint's reset-at-episode-boundary half of the
+  contract - `lstm_state_carried` in `SelfTest` today only covers that the
+  state is round-tripped between ticks, not that it's zeroed at the
+  boundary (verified by inspection: every boundary funnels through
+  `FightController.resetEpisodeOutcome`, which calls
+  `InferenceClient.resetLstmState`).

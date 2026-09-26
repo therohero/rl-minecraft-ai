@@ -71,6 +71,17 @@ public final class SelfTest {
     private double aimErrStart = Double.NaN;
     private double aimErrEnd = Double.NaN;
     private int dummyId = -1;
+    // lstm_state continuity (MockInferenceServer always echoes one - see its
+    // class doc comment): first/last h[0] seen and whether the sequence ever
+    // went backwards, i.e. InferenceClient actually carries the state
+    // between ticks instead of dropping it. Does NOT cover the
+    // reset-at-episode-boundary half of the contract - that needs a real
+    // in-fight episode boundary (kill/death/disengage), which this solo
+    // scenario never reaches (see the "extend the debug-harness selftest"
+    // TODO item).
+    private int lstmFirst = -1;
+    private int lstmLast = -1;
+    private boolean lstmMonotonic = true;
 
     private final List<JsonObject> results = new ArrayList<>();
     private boolean finished = false;
@@ -106,6 +117,14 @@ public final class SelfTest {
             if (hasBadNumbers(obs)) obsBadKeys++;
         }
         if (action != null) actionsApplied++;
+        if (action != null && action.lstmState() != null) {
+            int h0 = firstArrayInt(action.lstmState(), "h", -1);
+            if (h0 >= 0) {
+                if (lstmFirst < 0) lstmFirst = h0;
+                if (h0 < lstmLast) lstmMonotonic = false;
+                lstmLast = h0;
+            }
+        }
         var g = controller.guard();
         if (g != null) {
             cpsMax = Math.max(cpsMax, g.cps());
@@ -239,6 +258,13 @@ public final class SelfTest {
             String.format("peak cps %.1f vs cap %.1f", cpsMax, cfg.maxCps));
         record("rotation_quantised", quantiseViolations == 0,
             quantiseViolations + " applied rotations were not a mouse-count multiple");
+
+        // See MockInferenceServer's class doc comment: it always echoes
+        // lstm_state = {"h": [incoming h[0] + 1]}, so a rising sequence here
+        // is only possible if InferenceClient is actually round-tripping
+        // the carried state on every request rather than dropping it.
+        record("lstm_state_carried", lstmFirst >= 0 && lstmMonotonic && lstmLast > lstmFirst,
+            "lstm_state h[0] " + lstmFirst + " -> " + lstmLast + " (monotonic=" + lstmMonotonic + ")");
     }
 
     private void verifyDataset() {
@@ -309,6 +335,15 @@ public final class SelfTest {
         if (d >= 180.0) d -= 360.0;
         if (d < -180.0) d += 360.0;
         return d;
+    }
+
+    /** `obj[key][0]` as an int, or `def` if that path doesn't parse. */
+    private static int firstArrayInt(JsonObject obj, String key, int def) {
+        try {
+            return obj.getAsJsonArray(key).get(0).getAsInt();
+        } catch (RuntimeException e) {
+            return def;
+        }
     }
 
     private static boolean hasBadNumbers(JsonObject obs) {
