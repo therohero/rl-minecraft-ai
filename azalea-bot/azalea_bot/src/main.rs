@@ -796,6 +796,10 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                     &decision.action,
                     held.is_mining_tool(),
                     held == Item::Bow,
+                    matches!(
+                        held,
+                        Item::Bow | Item::Crossbow | Item::GoldenApple | Item::GoldenHead
+                    ),
                 );
                 apply_action(&bot, &state, &safe, tick);
                 if trace_enabled() {
