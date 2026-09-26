@@ -23,6 +23,15 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   `place_reach` exactly - see azalea-bot/README.md), but never checked
   against a real server.
 
+- [ ] **Remaining GrimAC flags on the local test server.** A first run of
+  `azalea_bot` against `mod/test-server` (Paper 1.21.11 + GrimAC 2.3.74) flagged
+  Simulation (hundreds, constant ~0.02 / ~0.10 offsets), NoSlow, BadPacketsJ and
+  AntiKB. The guard now holds still and releases the bow while an item is in use
+  (targets NoSlow and likely part of Simulation) - re-run and check what's left;
+  Simulation / BadPacketsJ / AntiKB are not yet root-caused. A proper fix for the
+  use-item slowdown is patching azalea's `local_player_ai_step` (`TODO: using
+  items`) so a slowed walk is possible instead of standing still.
+
 ## Mod (`mod/`)
 
 - [ ] **Bring the mod's live bridge up to parity with `azalea_bot`.**

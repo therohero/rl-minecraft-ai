@@ -197,6 +197,8 @@ it to stay inside legit-client bounds:
 | sprint | drops sprint when hunger is too low, an item is being used, sneaking, or not moving forward | food > 6 |
 | sneak | can't toggle crouch faster than a minimum hold (rapid crouch spam is its own flag) | 3 ticks |
 | attack vs. use | never sends an attack and a `use_item` on the same tick | - |
+| movement while using an item | sends no walk/sprint input while the server has an item in use (or `use_item` is sent this tick). azalea 0.15 doesn't apply vanilla's 0.2x use-item slowdown, so full-speed input is what GrimAC's NoSlow / Simulation checks flag; standing still is the legal choice | - |
+| bow release | sends one `ReleaseUseItem` when the policy stops holding a drawn bow (azalea only ever *starts* using; without it the bow stays "in use" server-side and the arrow never fires) | - |
 
 It is **geometry, rate limiting and humanisation only** - it never invents
 inputs. Every limit has an env override; it logs a periodic summary of what

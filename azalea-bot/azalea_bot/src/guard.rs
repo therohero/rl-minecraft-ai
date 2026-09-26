@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use azalea::block::BlockState;
 use azalea::ecs::prelude::Entity;
+use azalea::entity::metadata::AbstractLivingUsingItem;
 use azalea::entity::{LookDirection, Physics, Position};
 use azalea::interact::pick::pick_block;
 use azalea::physics::collision::BlockWithShape;
@@ -192,6 +193,21 @@ impl GuardConfig {
     }
 }
 
+/// While an item is in use vanilla scales movement input by 0.2 (and drops
+/// sprint). `azalea` can only send whole-direction input, so the legal
+/// choice is to stand still - a slowed walk would need a fractional input.
+fn hold_still_while_using_item(
+    using_item: bool,
+    walk: WalkDirection,
+    sprint: Option<SprintDirection>,
+) -> (WalkDirection, Option<SprintDirection>) {
+    if using_item {
+        (WalkDirection::None, None)
+    } else {
+        (walk, sprint)
+    }
+}
+
 fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
@@ -218,6 +234,10 @@ pub(crate) struct SafeAction {
     /// apply, mirroring `sim/src/arena.rs::mine_step`'s priority over melee.
     pub mine: Option<BlockPos>,
     pub use_item: bool,
+    /// Send `ReleaseUseItem` this tick: the policy stopped holding a bow it
+    /// was drawing. azalea has no release call - `start_use_item` only ever
+    /// starts - so without this the server keeps the bow "in use" forever.
+    pub release_use: bool,
     pub sneak: bool,
     pub held_slot: i64,
 }
@@ -236,6 +256,9 @@ pub(crate) struct Guard {
     /// Current committed sneak state and how many ticks it's been held.
     sneak_state: bool,
     sneak_held_ticks: u32,
+    /// A `ReleaseUseItem` has been sent and the server's "using item" flag
+    /// hasn't dropped yet - stops the release repeating every tick.
+    release_pending: bool,
     suppressed_attacks: u64,
     suppressed_sprints: u64,
     suppressed_jumps: u64,
@@ -255,6 +278,7 @@ impl Guard {
             next_click_at: now,
             sneak_state: false,
             sneak_held_ticks: u32::MAX / 2,
+            release_pending: false,
             suppressed_attacks: 0,
             suppressed_sprints: 0,
             suppressed_jumps: 0,
@@ -281,11 +305,21 @@ impl Guard {
         state: &State,
         raw: &Action,
         held_is_mining_tool: bool,
+        held_is_bow: bool,
     ) -> SafeAction {
         let (yaw, pitch) = self.resolve_look(state, raw);
 
         let walk = discretize_walk_direction(raw.move_x, raw.move_z);
-        let using_item = raw.use_item && !raw.attack;
+        // The server's own view of whether an item is in use (drawing a
+        // bow, eating). azalea 0.15 doesn't model the 0.2x movement
+        // slowdown that comes with it (`local_player_ai_step` has a
+        // `TODO: using items`), so moving at all while it's set is what
+        // GrimAC's NoSlow / Simulation checks flag.
+        let server_using_item = bot
+            .get_component::<AbstractLivingUsingItem>()
+            .map(|u| u.0)
+            .unwrap_or(false);
+        let using_item = (raw.use_item && !raw.attack) || server_using_item;
         let sprint = self.resolve_sprint(bot, raw, walk, using_item);
         let jump = self.resolve_jump(bot, raw);
         let sneak = self.resolve_sneak(raw);
@@ -309,6 +343,13 @@ impl Guard {
         // attack (or a mine) always wins (it drops any raised guard anyway).
         let use_item = raw.use_item && attack.is_none() && mine.is_none();
 
+        let release_use = self.resolve_release(server_using_item, use_item, held_is_bow);
+        let (walk, sprint) = if self.cfg.disabled {
+            (walk, sprint)
+        } else {
+            hold_still_while_using_item(server_using_item || use_item, walk, sprint)
+        };
+
         self.maybe_report();
 
         SafeAction {
@@ -320,9 +361,26 @@ impl Guard {
             attack,
             mine,
             use_item,
+            release_use,
             sneak,
             held_slot: raw.held_slot,
         }
+    }
+
+    /// One `ReleaseUseItem` when the server still has a bow drawn but the
+    /// policy stopped asking to use it (this is what fires the arrow).
+    /// Consumables are left alone - vanilla can't cancel an eat mid-way by
+    /// letting go in this model, and azalea treats them as held to the end.
+    fn resolve_release(&mut self, server_using_item: bool, use_item: bool, held_is_bow: bool) -> bool {
+        if !server_using_item {
+            self.release_pending = false;
+            return false;
+        }
+        if use_item || !held_is_bow || self.release_pending {
+            return false;
+        }
+        self.release_pending = true;
+        true
     }
 
     /// The placed block (plank/cobweb only - see [`is_minable_placed_block`])
@@ -695,6 +753,33 @@ fn segment_hits_block(world: &Instance, origin: [f64; 3], dir: [f64; 3], max_t: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn using_an_item_holds_still_and_drops_sprint() {
+        let (w, sp) = hold_still_while_using_item(
+            true,
+            WalkDirection::Forward,
+            Some(SprintDirection::Forward),
+        );
+        assert!(matches!(w, WalkDirection::None) && sp.is_none());
+        let (w, sp) = hold_still_while_using_item(
+            false,
+            WalkDirection::Forward,
+            Some(SprintDirection::Forward),
+        );
+        assert!(matches!(w, WalkDirection::Forward) && sp.is_some());
+    }
+
+    #[test]
+    fn bow_release_fires_once_per_draw() {
+        let mut g = Guard::new(GuardConfig::default());
+        assert!(!g.resolve_release(true, true, true), "still drawing");
+        assert!(g.resolve_release(true, false, true), "let go -> release");
+        assert!(!g.resolve_release(true, false, true), "already sent");
+        assert!(!g.resolve_release(false, false, true), "server dropped it");
+        assert!(g.resolve_release(true, false, true), "next draw releases again");
+        assert!(!g.resolve_release(true, false, false), "a non-bow is never released");
+    }
+
     use super::*;
 
     #[test]

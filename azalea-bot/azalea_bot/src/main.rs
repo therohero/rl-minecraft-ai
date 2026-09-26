@@ -109,6 +109,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use azalea::Account;
+use azalea::core::direction::Direction;
+use azalea::protocol::packets::game::s_player_action::Action as PlayerAction;
+use azalea::protocol::packets::game::ServerboundPlayerAction;
 use azalea::BlockPos;
 use azalea::block::BlockState;
 use azalea::block::fluid_state::FluidKind;
@@ -782,12 +785,13 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                     );
                 }
                 let (_, _, _, _, held_id) = read_inventory(&bot);
-                let held_is_mining_tool = Item::from_id(held_id).is_mining_tool();
+                let held = Item::from_id(held_id);
                 let safe = state.guard.lock().unwrap().sanitize(
                     &bot,
                     &state,
                     &decision.action,
-                    held_is_mining_tool,
+                    held.is_mining_tool(),
+                    held == Item::Bow,
                 );
                 apply_action(&bot, &state, &safe, tick);
             }
@@ -1417,6 +1421,15 @@ fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
     bot.set_direction(safe.yaw_deg, safe.pitch_deg);
     apply_held_slot(bot, state, safe.held_slot, tick);
     bot.set_crouching(safe.sneak);
+
+    if safe.release_use {
+        bot.write_packet(ServerboundPlayerAction {
+            action: PlayerAction::ReleaseUseItem,
+            pos: BlockPos::new(0, 0, 0),
+            direction: Direction::Down,
+            seq: 0,
+        });
+    }
 
     if safe.jump {
         bot.jump();
