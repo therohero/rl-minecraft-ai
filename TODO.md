@@ -35,16 +35,6 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   `auth-method: NONE`; automate the online-mode (Microsoft) path instead of a
   manual edit.
 
-## Sim fidelity (`training/sim/`)
-
-- [ ] **Non-full blocks.** No slabs/stairs, so the 0.6 step-up never fires on
-  terrain. Low priority. Add them, but no kit places/carries them by default.
-
-## Tooling / infra
-
-- [ ] **`torch.export` migration.** `export_model.py` uses TorchScript because
-  its on-disk format is stable across torch versions; revisit `.pt2` once it
-  makes the same cross-version guarantee.
 ## Mod (`mod/`)
 
 - [ ] **Tune the mod virtual-mouse against a real anticheat.** `ClientGuard`'s
