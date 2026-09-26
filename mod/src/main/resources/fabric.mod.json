@@ -8,7 +8,7 @@
 		"rl-minecraft-ai"
 	],
 	"contact": {},
-	"license": "CC0-1.0",
+	"license": "GPL-3.0-only",
 	"icon": "assets/rl-minecraft-ai/icon.png",
 	"environment": "*",
 	"entrypoints": {

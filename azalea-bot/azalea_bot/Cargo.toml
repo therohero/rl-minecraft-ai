@@ -2,6 +2,7 @@
 name = "azalea_bot"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-only"
 
 # NOTE: requires the nightly Rust toolchain - see rust-toolchain.toml.
 # Azalea's NBT dependency (`simdnbt`) currently uses unstable features

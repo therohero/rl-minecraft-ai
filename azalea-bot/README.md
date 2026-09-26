@@ -1,5 +1,9 @@
 # Bot Bridge: plugging the trained model into a real Minecraft client/server
 
+> **Warning:** using this bot on a public server is mostly not allowed and can
+> get you kicked or banned (including your Minecraft account). Only run it on
+> servers you own or that explicitly permit bot testing.
+
 This directory is the seam between the trained PyTorch policy and an
 actual live Minecraft game. Nothing in the training pipeline (Rust sim,
 PPO, self-play) needs to know this exists; nothing here needs to know

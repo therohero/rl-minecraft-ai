@@ -3,6 +3,15 @@
 A reinforcement-learning Minecraft PvP bot: train a policy by self-play in a
 fast headless Rust sim, then run it against a real Minecraft server.
 
+> **Warning - read before joining any server.** This project is a Minecraft
+> PvP *bot* (an automated client). Running it on a **public server is mostly
+> not allowed** - almost every server's rules forbid bots and automation - and
+> its movement and combat inputs can trip the server's anticheat. **You can be
+> kicked, banned, or IP-banned**, and that can include your Minecraft account.
+> Only use it on servers you own, or where the operators have explicitly said
+> you may test bots there. It is provided for research and testing, with no
+> warranty, and you are responsible for how you use it.
+
 ## Layout
 
 The repo is split into three top-level folders:
@@ -418,3 +427,9 @@ The `pytest` suite cross-checks the inference bridge's per-observation
 decode (`features.observation_to_row`) against training's vectorized one
 (`wire_batch_to_obs`) so the two never drift, and checks that
 `ActorCritic.evaluate` reproduces the log-probs `ActorCritic.act` sampled.
+
+## License
+
+GPL-3.0-only - see [`LICENSE`](LICENSE). `azalea-bot/vendor/azalea-physics` is
+a vendored copy of [azalea](https://github.com/azalea-rs/azalea)'s physics
+crate and stays under its own MIT license (see the `LICENSE` file there).

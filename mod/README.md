@@ -1,5 +1,9 @@
 # `mod/` - Fabric client mod (`/fight`)
 
+> **Warning:** using this bot on a public server is mostly not allowed and can
+> get you kicked or banned (including your Minecraft account). Only run it on
+> servers you own or that explicitly permit bot testing.
+
 A client-side Fabric mod (Minecraft 1.21.11, Java 21) that lets you drive the
 trained RL policy from your own Minecraft client with a chat command, and
 record live fights as a training dataset.
