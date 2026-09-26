@@ -32,6 +32,42 @@ $ErrorActionPreference = "Stop"
 function Write-Log($msg) { Write-Host "[run_bot.ps1] $msg" }
 function Die($msg) { Write-Host "[run_bot.ps1] ERROR: $msg" -ForegroundColor Red; exit 1 }
 
+# Whether azalea-bot\viaproxy\saves.json already has a saved ViaProxy account.
+function Test-ViaProxyAccount($ViaDir) {
+    $path = Join-Path $ViaDir "saves.json"
+    if (-not (Test-Path $path -PathType Leaf)) { return $false }
+    try {
+        $accounts = (Get-Content $path -Raw | ConvertFrom-Json).accountsV4
+        return ($null -ne $accounts) -and ($accounts.Count -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+# Drives ViaProxy's own interactive CLI ('account add microsoft') so the
+# upstream (real-server) connection can authenticate as a real Microsoft
+# account - see run_bot.sh's ensure_viaproxy_microsoft_account (keep the two
+# in sync). The device-code login itself can't be scripted away - a human
+# still has to open the printed URL and sign in - this only removes
+# everything *around* that one unavoidable step. Idempotent.
+function Confirm-ViaProxyMicrosoftAccount($ViaDir, $Jar) {
+    if (Test-ViaProxyAccount $ViaDir) { return }
+    Write-Log "no saved ViaProxy account yet - starting its one-time Microsoft login."
+    Write-Log "a device code + URL will be printed below; open the URL in a browser and sign in with"
+    Write-Log "the Microsoft account you want the bot to connect as. This only has to be done once -"
+    Write-Log "the saved login (azalea-bot\viaproxy\saves.json) is reused on every run after."
+    Push-Location $ViaDir
+    try {
+        "account add microsoft`nstop`n" | & java -jar $Jar cli
+    } finally {
+        Pop-Location
+    }
+    if (-not (Test-ViaProxyAccount $ViaDir)) {
+        Die "ViaProxy still has no saved account after the login attempt - see the output above and try again"
+    }
+    Write-Log "ViaProxy account saved."
+}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BotDir = Join-Path $ScriptDir "azalea-bot\azalea_bot"
 $PythonDir = Join-Path $ScriptDir "training\python"
@@ -128,11 +164,21 @@ if ($McVersion -ne "") {
         $asset = $rel.assets | Where-Object { $_.name -like "*.jar" -and $_.name -notlike "*java8*" } | Select-Object -First 1
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $Jar
     }
+    # $Auth picks ViaProxy's own upstream auth-method here (not the bot's -
+    # see the param block doc above): 'microsoft' -> a real account
+    # (auth-method ACCOUNT, index 0 - the only account this script ever
+    # adds); 'offline' (default) -> unauthenticated upstream, as before.
+    if ($Auth -eq "microsoft") {
+        Confirm-ViaProxyMicrosoftAccount $ViaDir $Jar
+        $ViaProxyAuthLines = "auth-method: ACCOUNT`nminecraft-account-index: 0"
+    } else {
+        $ViaProxyAuthLines = "auth-method: NONE"
+    }
     @"
 bind-address: 127.0.0.1:$ViaProxyPort
 target-address: $ServerAddr
 target-version: $McVersion
-auth-method: NONE
+$ViaProxyAuthLines
 proxy-online-mode: false
 "@ | Set-Content -Path (Join-Path $ViaDir "viaproxy.yml")
     Write-Log "starting ViaProxy: $ServerAddr ($McVersion) -> 127.0.0.1:$ViaProxyPort"
@@ -149,13 +195,18 @@ proxy-online-mode: false
     if (-not $ok) { Die "ViaProxy did not open port $ViaProxyPort" }
     Write-Log "ViaProxy is up."
     $ServerAddr = "127.0.0.1:$ViaProxyPort"
+    # The bot itself always talks to the *local*, unauthenticated ViaProxy -
+    # $Auth picked ViaProxy's own upstream auth-method above, not the bot's.
+    $BotAuth = "offline"
+} else {
+    $BotAuth = $Auth
 }
 
 # 4. Connect the bot. Stop the background processes afterwards if we started them.
-Write-Log "connecting the bot to $ServerAddr as '$Username' (auth: $Auth)..."
+Write-Log "connecting the bot to $ServerAddr as '$Username' (auth: $BotAuth)..."
 Push-Location $BotDir
 try {
-    cargo run --release -- $ServerAddr $Username $InferenceUrl --auth $Auth
+    cargo run --release -- $ServerAddr $Username $InferenceUrl --auth $BotAuth
 } finally {
     Pop-Location
     if ($ViaProxyProc -and -not $ViaProxyProc.HasExited) {

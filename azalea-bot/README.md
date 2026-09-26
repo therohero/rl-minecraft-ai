@@ -421,3 +421,120 @@ head, a categorical held-slot), which "uses the training more"; `--temperature`
 exported `policy.pt` now returns `(cont_mean, cont_std, binary_probs,
 slot_probs)` so both paths work from one artifact - re-export any older
 model.
+
+### Live frame stacking and recurrent (`--lstm`) inference
+
+`export_model.py` used to refuse a `--frame-stack N>1` or `--lstm`
+checkpoint - the live bridges built one memoryless frame and kept no state
+between ticks. Both now export and run live; `inference_server.py` stays
+otherwise stateless (no bot identity, no session), so the **client** carries
+whatever history the policy needs and sends it along each request:
+
+- **frame stacking** (`spec.json`'s `frame_stack > 1`): add a `prev_frames`
+  key to the `/act` body - a JSON array of up to `frame_stack - 1` older
+  observation dicts, **newest first**. Fewer than that (just connected, or
+  just respawned) is fine - missing history is zero-padded server-side,
+  exactly like a fresh training episode
+  (`training/python/frame_stack.py::FrameStacker.reset`). `azalea_bot` keeps
+  this history itself (`State::frame_history`, a ring of the last
+  `frame_stack - 1` observations) and clears it on respawn.
+- **recurrent** (`spec.json`'s `arch.lstm_hidden > 0`): add
+  `"lstm_state": {"h": [...], "c": [...]}` (flat float arrays of that width -
+  the hidden state carried from the previous call) to the body; omit it on the
+  very first call - treated as all-zero, the same as a fresh sim episode. The
+  response then includes the updated `lstm_state` to send back next time.
+  `azalea_bot` carries it in the inference worker (`inference::run_worker`),
+  zeroed whenever `Event::Death` bumps `State::episode_gen`.
+
+Both are purely additive - a plain body without these keys behaves exactly
+as it always has for a `frame_stack=1`, non-recurrent policy, and a
+checkpoint trained with *neither* flag needs no client changes at all.
+Combining `--frame-stack` with `--lstm` in the same run is still refused at
+export time (an untested live interaction, not a fundamental limit).
+
+### Inference server hot-reload
+
+`inference_server.py` now picks up a freshly-exported `policy.pt` /
+`spec.json` without a restart: every request cheaply stat()s `policy.pt`,
+and a changed mtime triggers a reload under a lock (a request in flight
+during the swap sees either the fully-old or fully-new policy, never a torn
+mix). `kill -HUP <pid>` (the PID is printed at startup) forces a reload
+immediately even without a fresh mtime. A reload that fails (e.g.
+`export_model.py` still mid-write) logs and keeps serving the last-good
+policy rather than crashing the server.
+
+### Optional binary `/act` body
+
+JSON stays the default seam. For the case where JSON encode/decode ever
+shows up in the round-trip stats (`RoundTripStats` in `azalea_bot`'s
+console log), POST with `Content-Type: application/octet-stream` and the
+body is the raw little-endian float32 **wire** observation row -
+`spec.json`'s `wire_floats_per_slot` floats, the same pre-normalization
+layout `sim/src/protocol.rs::Observation::write_wire` emits (not
+`obs_dim` - yaw/pitch are 2 raw floats here vs. 4 sin/cos floats once
+normalized). The server decodes it with the already-tested
+`features.wire_batch_to_obs` - reusing the sim/trainer's own code path
+rather than adding a second normalization implementation to keep in sync.
+The response is then also raw little-endian float32, 10 floats in wire
+action order (`move_x, move_z, yaw_delta, pitch_delta, jump, attack,
+sprint, use_item, sneak, held_slot`, booleans as `0.0`/`1.0`). Only
+defined for a `frame_stack=1`, non-recurrent policy - there's no binary
+layout for frame history / LSTM state yet, so that combination gets a
+400. `azalea_bot` builds this row via `Observation::to_wire_f32`.
+
+### Live splash potions
+
+`azalea_bot` now distinguishes a splash potion's brewed contents - all the
+same generic `minecraft:splash_potion` `ItemKind` since 1.20.5's item
+components - by reading its `PotionContents` data component
+(`Item::from_stack`, used everywhere inventory/hotbar items are resolved).
+Throwing one needs no new action: a splash potion completes on the same
+"use item" packet `bot.start_use_item()` already sends for eating / raising
+a shield / drawing a bow, so `use_item` with a splash potion selected
+already throws it.
+
+### Live mining (`uhc` kit)
+
+Holding a pickaxe or axe, an `attack` action now mines a placed block under
+the crosshair instead of swinging, mirroring `sim/src/arena.rs::mine_step`'s
+priority over melee (`self_mining` reports real progress 0..1 via azalea's
+own `MineProgress` component). Deliberately narrower than "anything the
+tool can mine at any speed": only a plank variant or cobweb - the blocks
+the `uhc` kit can itself place - is a valid target
+(`is_minable_placed_block`), never arbitrary world terrain or builds. A
+live server's terrain and structures are real, unlike the sim's closed
+arena where every minable block came from a player's own hand; mining
+blocks the kit never placed would be indistinguishable from griefing.
+
+### UHC placement parity
+
+Planks / cobweb / bucket placement (`use_item` with one selected) and the
+mining above both go through azalea's own crosshair hit-testing
+(`Client::start_use_item`'s internal raycast, `Client::left_click_mine`'s
+target), which reads the *live* `block_interaction_range` attribute -
+vanilla survival's 4.5 blocks, matching the sim's `place_reach` exactly.
+So this already has parity by construction rather than needing a
+hand-rolled raycast to match. The golden head (`Item::GoldenHead`) is
+reachable the same way any hotkeyed item is - `apply_held_slot`'s
+inventory-swap fallback isn't limited to the 9 physical hotbar slots, it
+opens the inventory and swaps a matching item in from wherever it's
+carried. None of this has been checked against a real server yet (needs a
+live match to confirm placement actually lands where the policy expects,
+not just that the reach constant matches on paper) - see `TODO.md`.
+
+### ViaProxy online-mode (Microsoft) auth
+
+`run_bot.sh` / `run_bot.ps1` used to hardcode ViaProxy's `auth-method:
+NONE`, so joining a real online-mode server through ViaProxy needed a
+manual `viaproxy.yml` edit plus knowing ViaProxy's own account UI/CLI.
+`AUTH=microsoft` (bash) / `-Auth microsoft` (PowerShell) now drives that
+setup automatically: the script checks `azalea-bot/viaproxy/saves.json`
+for a saved account, and if there isn't one, launches ViaProxy's `cli`
+mode and feeds it `account add microsoft` - which prints a device-code URL
+or the script to open in a browser and sign in. That one human step can't
+be scripted away (it's Microsoft's own OAuth device flow), but everything
+around it now is: the saved login is reused on every run after, and
+`viaproxy.yml` is written with `auth-method: ACCOUNT`. Note this now means
+`AUTH`/`-Auth` picks *ViaProxy's* upstream auth when going through it, not
+the bot's own - the bot always connects to the local ViaProxy as `offline`
+(ViaProxy is the one doing the real authentication upstream).

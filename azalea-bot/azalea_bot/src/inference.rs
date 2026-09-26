@@ -25,6 +25,20 @@ use tokio::sync::watch;
 
 use crate::{Action, LstmState, Observation};
 
+/// Everything one `/act` round-trip needs, snapshotted from `State` the
+/// moment the tick's observation was built - live frame-stack history, a
+/// no-op for a plain memoryless policy (see `Consts::frame_stack` in
+/// `main.rs`). The carried LSTM state lives in `run_worker`, not here.
+#[derive(Clone)]
+pub(crate) struct ObsPacket {
+    pub tick: u64,
+    pub obs: Observation,
+    /// Older frames, newest-first, length `0..=frame_stack-1` (fewer near
+    /// the start of a life / just after a respawn - the server zero-pads
+    /// the rest, mirroring `training/python/frame_stack.py::reset`).
+    pub prev_frames: Vec<Observation>,
+}
+
 /// An action together with the tick whose observation produced it, so the
 /// tick loop can tell how stale the decision it is about to apply is.
 #[derive(Clone)]
@@ -47,10 +61,10 @@ impl ActionCell {
     }
 }
 
-/// The observation side of the channel: `(tick, observation)`, `None`
-/// before the first tick in a loaded world.
-pub(crate) type ObsSender = watch::Sender<Option<(u64, Observation)>>;
-pub(crate) type ObsReceiver = watch::Receiver<Option<(u64, Observation)>>;
+/// The observation side of the channel - `None` before the first tick in a
+/// loaded world.
+pub(crate) type ObsSender = watch::Sender<Option<ObsPacket>>;
+pub(crate) type ObsReceiver = watch::Receiver<Option<ObsPacket>>;
 
 /// Runs until the observation channel closes (i.e. the client shut down).
 ///
@@ -76,9 +90,10 @@ pub(crate) async fn run_worker(
             break; // every sender dropped - client is gone
         }
         let latest = obs_rx.borrow_and_update().clone();
-        let Some((tick, observation)) = latest else {
+        let Some(packet) = latest else {
             continue;
         };
+        let tick = packet.tick;
 
         let gen = episode_gen.load(Ordering::Relaxed);
         if gen != last_gen {
@@ -87,7 +102,7 @@ pub(crate) async fn run_worker(
         }
 
         let started = Instant::now();
-        match fetch_action(&http, &act_url, &observation, lstm_state.clone()).await {
+        match fetch_action(&http, &act_url, &packet, lstm_state.clone()).await {
             Ok(action) => {
                 stats.record(started.elapsed());
                 // Carried into the next request whether or not this
@@ -153,17 +168,23 @@ impl RoundTripStats {
     }
 }
 
-/// The `/act` request body: the observation's fields plus, only when
-/// non-`None`, a top-level `lstm_state` - matches
-/// `inference_server.py`'s contract (an absent/`null` `lstm_state` there
-/// means "start from zeroed"). Generic over the flattened type so the wire
-/// shape (flatten + skip-if-none) is unit-testable without a real,
-/// ~40-field `Observation` (see `tests` below); `fetch_action` always
-/// instantiates it as `ActRequest<'_, Observation>`.
+/// The `/act` request body: this tick's observation flattened at the top
+/// level (unchanged from before frame-stacking/LSTM existed - a plain
+/// memoryless policy's client is unaffected byte-for-byte), plus additive
+/// optional fields a server that knows about them can use: `prev_frames`
+/// (live frame stacking, omitted when empty) and, only when non-`None`, a
+/// top-level `lstm_state` - matches `inference_server.py`'s contract (an
+/// absent/`null` `lstm_state` there means "start from zeroed"). Generic
+/// over the flattened type so the wire shape (flatten + skip-if-none) is
+/// unit-testable without a real, ~40-field `Observation` (see `tests`
+/// below); `fetch_action` always instantiates it as
+/// `ActRequest<'_, Observation>`.
 #[derive(Serialize)]
 struct ActRequest<'a, O: Serialize> {
     #[serde(flatten)]
     obs: &'a O,
+    #[serde(skip_serializing_if = "<[Observation]>::is_empty")]
+    prev_frames: &'a [Observation],
     #[serde(skip_serializing_if = "Option::is_none")]
     lstm_state: Option<LstmState>,
 }
@@ -171,10 +192,10 @@ struct ActRequest<'a, O: Serialize> {
 async fn fetch_action(
     http: &reqwest::Client,
     act_url: &str,
-    observation: &Observation,
+    packet: &ObsPacket,
     lstm_state: Option<LstmState>,
 ) -> eyre::Result<Action> {
-    let body = ActRequest { obs: observation, lstm_state };
+    let body = ActRequest { obs: &packet.obs, prev_frames: &packet.prev_frames, lstm_state };
     let action = http
         .post(act_url)
         .json(&body)
@@ -199,7 +220,7 @@ mod tests {
     #[test]
     fn act_request_omits_lstm_state_when_none() {
         let obs = FakeObs { a: 1, b: true };
-        let req = ActRequest { obs: &obs, lstm_state: None };
+        let req = ActRequest { obs: &obs, prev_frames: &[], lstm_state: None };
         let v = serde_json::to_value(&req).unwrap();
         // No `lstm_state` key at all - the non-recurrent wire shape must be
         // byte-for-byte what inference_server.py expected before lstm_state
@@ -213,7 +234,7 @@ mod tests {
         // binary-precision mismatch unrelated to what this test checks.
         let obs = FakeObs { a: 1, b: true };
         let state = LstmState { h: vec![0.5, 0.25], c: vec![-1.5, 2.0] };
-        let req = ActRequest { obs: &obs, lstm_state: Some(state) };
+        let req = ActRequest { obs: &obs, prev_frames: &[], lstm_state: Some(state) };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["a"], 1);
         assert_eq!(v["b"], true);
