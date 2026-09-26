@@ -109,6 +109,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use azalea::Account;
+use azalea::interact::pick::HitResultComponent;
+use azalea::interact::BlockStatePredictionHandler;
+use azalea::protocol::packets::game::ServerboundUseItem;
+use azalea::protocol::packets::game::s_interact::InteractionHand;
+use azalea::core::direction::Direction;
+use azalea::protocol::packets::game::s_player_action::Action as PlayerAction;
+use azalea::protocol::packets::game::ServerboundPlayerAction;
 use azalea::BlockPos;
 use azalea::block::BlockState;
 use azalea::block::fluid_state::FluidKind;
@@ -782,14 +789,22 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                     );
                 }
                 let (_, _, _, _, held_id) = read_inventory(&bot);
-                let held_is_mining_tool = Item::from_id(held_id).is_mining_tool();
+                let held = Item::from_id(held_id);
                 let safe = state.guard.lock().unwrap().sanitize(
                     &bot,
                     &state,
                     &decision.action,
-                    held_is_mining_tool,
+                    held.is_mining_tool(),
+                    held == Item::Bow,
+                    matches!(
+                        held,
+                        Item::Bow | Item::Crossbow | Item::GoldenApple | Item::GoldenHead
+                    ),
                 );
                 apply_action(&bot, &state, &safe, tick);
+                if trace_enabled() {
+                    trace_tick(&bot, tick, &safe);
+                }
             }
         }
         Event::Death(_) => {
@@ -1400,6 +1415,50 @@ fn is_cobweb(bs: BlockState) -> bool {
     Box::<dyn BlockTrait>::from(bs).id() == "cobweb"
 }
 
+/// `AZALEA_TRACE=1`: log one line per tick with the position, velocity and
+/// the exact inputs sent, so the timestamp of a GrimAC flag (server log) can be
+/// matched to what the bot was doing. Off by default (a line per tick).
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AZALEA_TRACE").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+fn trace_tick(bot: &Client, tick: u64, safe: &SafeAction) {
+    let (Some(pos), Some(phys)) = (
+        bot.get_component::<Position>(),
+        bot.get_component::<azalea::entity::Physics>(),
+    ) else {
+        return;
+    };
+    let using = bot.get_component::<AbstractLivingUsingItem>().map(|u| u.0).unwrap_or(false);
+    info!(
+        target: "azalea_trace",
+        "t={tick} pos=({:.3},{:.3},{:.3}) vel=({:.4},{:.4},{:.4}) ground={} walk={:?} sprint={:?} jump={} sneak={} use={} srv_using={using} attack={} yaw={:.2} pitch={:.2}",
+        pos.x, pos.y, pos.z, phys.velocity.x, phys.velocity.y, phys.velocity.z, phys.on_ground(),
+        safe.walk, safe.sprint, safe.jump, safe.sneak, safe.use_item, safe.attack.is_some(),
+        safe.yaw_deg, safe.pitch_deg,
+    );
+}
+
+/// Whether the client's own crosshair pick currently lands on an entity.
+fn crosshair_on_entity(bot: &Client) -> bool {
+    bot.get_component::<HitResultComponent>()
+        .is_some_and(|h| h.as_entity_hit_result().is_some())
+}
+
+/// A bare `ServerboundUseItem` (main hand) with the current rotation - what
+/// `start_use_item` sends when the crosshair is on nothing.
+fn send_plain_use_item(bot: &Client) {
+    let seq = bot
+        .ecs
+        .lock()
+        .get_mut::<BlockStatePredictionHandler>(bot.entity)
+        .map(|mut h| h.start_predicting())
+        .unwrap_or(0);
+    let (y_rot, x_rot) = bot.direction();
+    bot.write_packet(ServerboundUseItem { hand: InteractionHand::MainHand, seq, x_rot, y_rot });
+}
+
 /// Execute a fully-sanitized [`SafeAction`] through Azalea's client API.
 /// Every decision (look integration, sprint legality, which entity to hit,
 /// attack/use mutual exclusion) was already made in `guard::Guard::sanitize`
@@ -1417,6 +1476,15 @@ fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
     bot.set_direction(safe.yaw_deg, safe.pitch_deg);
     apply_held_slot(bot, state, safe.held_slot, tick);
     bot.set_crouching(safe.sneak);
+
+    if safe.release_use {
+        bot.write_packet(ServerboundPlayerAction {
+            action: PlayerAction::ReleaseUseItem,
+            pos: BlockPos::new(0, 0, 0),
+            direction: Direction::Down,
+            seq: 0,
+        });
+    }
 
     if safe.jump {
         bot.jump();
@@ -1441,7 +1509,17 @@ fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
             // Raise the shield / draw the bow / eat / place / throw a
             // splash potion - azalea resolves what "use" means from the
             // held item and the block/entity under the crosshair.
-            bot.start_use_item();
+            if crosshair_on_entity(bot) {
+                // azalea's entity-interact path sends the hit location in
+                // world coordinates where vanilla sends it relative to the
+                // entity, which GrimAC flags (InvalidInteractCursor). Nothing
+                // useful happens when right-clicking another player anyway,
+                // so send just the plain use-item packet vanilla follows up
+                // with.
+                send_plain_use_item(bot);
+            } else {
+                bot.start_use_item();
+            }
         }
     }
 }

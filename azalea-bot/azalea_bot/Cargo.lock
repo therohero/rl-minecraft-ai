@@ -479,8 +479,6 @@ dependencies = [
 [[package]]
 name = "azalea-physics"
 version = "0.15.1+mc1.21.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14a220101605dc6445d5fa0a23e7465e1c099fcb8883bc8c73668311156ea8d2"
 dependencies = [
  "azalea-block",
  "azalea-core",

@@ -23,6 +23,19 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   `place_reach` exactly - see azalea-bot/README.md), but never checked
   against a real server.
 
+- [ ] **Confirm the GrimAC fixes on a real server, and the leftovers.** Against
+  `mod/test-server` (Paper 1.21.11 + GrimAC 2.3.74) the guard now holds still /
+  releases the bow during item use (NoSlow), keeps the previous rotation on
+  item-use ticks (BadPacketsJ), swings only within `reach - 0.35` (Reach), sends a
+  bare `UseItem` when the crosshair is on an entity (InvalidInteractCursor),
+  throttles `UseItem` to vanilla's 4-tick repeat (Post) and drops diagonal walking
+  (Simulation: 0 flags in 40 s with the real policy, was a flag every few
+  seconds). Still to verify with a *real player hitting the bot*: AntiKB, and the
+  vendored cobweb-slowdown patch (`vendor/azalea-physics`) with the bot stuck in a
+  web. Still open: the diagonal Simulation flag has no root cause (the input
+  scaling matches vanilla on paper) - find it so diagonals can come back; and
+  standing still while using an item should become a proper 0.2x slowed walk.
+
 ## Mod (`mod/`)
 
 - [ ] **Bring the mod's live bridge up to parity with `azalea_bot`.**

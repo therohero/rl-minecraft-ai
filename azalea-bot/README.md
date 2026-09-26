@@ -178,6 +178,10 @@ closest thing this bot has to training's episode boundary. For the
 default memoryless MLP policy this is a no-op - `lstm_state` is never sent
 or read.
 
+**Debug trace:** `AZALEA_TRACE=1` logs one `azalea_trace` line per tick (position, velocity, on-ground, every input sent, server "using item" flag, yaw/pitch) so a GrimAC flag's timestamp can be matched to what the bot was doing. Off by default.
+
+**Vendored azalea patch:** `vendor/azalea-physics` is upstream `azalea-physics` 0.15.1 (MIT) plus vanilla's cobweb slowdown in `collision::move_colliding` (upstream leaves `stuckSpeedMultiplier` as a TODO, so the client moved and took knockback at full speed inside a web while the server slowed it - GrimAC Simulation / AntiKB). It is wired in with `[patch.crates-io]` in `azalea_bot/Cargo.toml`; drop it once upstream has this.
+
 ### Client-side legality guard (`azalea_bot/src/guard.rs`)
 
 The policy trained in a sim that is vanilla-*shaped*, not vanilla-*exact*,
@@ -197,6 +201,13 @@ it to stay inside legit-client bounds:
 | sprint | drops sprint when hunger is too low, an item is being used, sneaking, or not moving forward | food > 6 |
 | sneak | can't toggle crouch faster than a minimum hold (rapid crouch spam is its own flag) | 3 ticks |
 | attack vs. use | never sends an attack and a `use_item` on the same tick | - |
+| movement while using an item | sends no walk/sprint input while the server has an item in use, or on a tick that starts a *held* use (bow, crossbow, golden apple/head - instant items like splash potions, blocks and an empty hand do not slow you). azalea 0.15 doesn't apply vanilla's 0.2x use-item slowdown, so full-speed input is what GrimAC's NoSlow / Simulation checks flag; standing still is the legal choice | - |
+| rotation on item use | holds the previous rotation on any tick that starts an item use. 1.21+ `UseItem` packets embed yaw/pitch and GrimAC's BadPacketsJ requires them to match the rotation the server last received; azalea writes the use packet before the new rotation reaches the server | - |
+| entity right-click | when the crosshair is on another entity, a `use_item` sends a bare `UseItem` packet instead of azalea's entity-interact (which puts the hit location in world coordinates where vanilla sends it entity-relative - GrimAC InvalidInteractCursor) | - |
+| reach margin | attacks only fire within `reach - 0.35`: the client's view of a moving target lags the server's by a tick or two, so exactly-3.0 here can be 3.3 there (GrimAC Reach) | reach 3.0, margin 0.35 |
+| diagonal walking | collapses `ForwardLeft`/`BackwardRight`/... to the axis the policy pushed harder (`AZALEA_GUARD_ALLOW_DIAGONAL=1` restores diagonals). Measured on the local GrimAC server: constant forward input never flagged Simulation, constant diagonal input flagged it continuously, and the real policy went from a flag every few seconds to none in 40 s once diagonals were dropped. Root cause not found (azalea's diagonal input scaling reads identically to vanilla's), so this is a workaround | - |
+| use-item repeat | a `UseItem` is sent at most every 4 ticks (vanilla's held-right-click repeat) and never while the server already has the item in use; a policy asking every tick otherwise sends one per tick (GrimAC `Post`) | 4 ticks |
+| bow release | sends one `ReleaseUseItem` when the policy stops holding a drawn bow (azalea only ever *starts* using; without it the bow stays "in use" server-side and the arrow never fires) | - |
 
 It is **geometry, rate limiting and humanisation only** - it never invents
 inputs. Every limit has an env override; it logs a periodic summary of what
@@ -208,6 +219,7 @@ AZALEA_GUARD_SMOOTHING        rotation low-pass factor 0.05..1.0 (1.0 = off)
 AZALEA_GUARD_AIM_JITTER_DEG   per-tick rotation tremor sigma (degrees; 0 = off)
 AZALEA_GUARD_AIM_SETTLE_DEG   turn size above which the attack waits a tick
 AZALEA_GUARD_REACH           melee reach in blocks
+AZALEA_GUARD_REACH_MARGIN    blocks subtracted from the reach before swinging (default 0.35)
 AZALEA_GUARD_HITBOX_EXPANSION crosshair hitbox inflation in blocks
 AZALEA_GUARD_MAX_CPS         average attacks/second (min click gap = 1000/this ms)
 AZALEA_GUARD_CLICK_JITTER_MS  sigma of the random jitter on that gap
