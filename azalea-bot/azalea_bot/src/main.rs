@@ -168,6 +168,12 @@ struct Consts {
     /// attack/use lock-out). Only `Modern` makes `self_swap_lockout` ever
     /// non-zero.
     input_order: InputOrder,
+    /// `0` for the default memoryless MLP policy. `> 0` for an `--lstm`
+    /// checkpoint: the width of the `(h, c)` state `mod inference` then
+    /// carries between ticks and threads through every `/act` call (see
+    /// `LstmState` and `inference::run_worker`). From `spec.json`'s
+    /// `arch.lstm_hidden`.
+    lstm_hidden: usize,
 }
 
 /// Mirrors `sim/src/config.rs::InputOrder` - which of the vanilla
@@ -207,6 +213,7 @@ impl Default for Consts {
             swap_lockout_seconds: 0.05,
             hurt_invulnerability_seconds: 1.0,
             input_order: InputOrder::Legacy,
+            lstm_hidden: 0,
         }
     }
 }
@@ -229,6 +236,14 @@ struct Spec {
     block_view_size: Option<usize>,
     #[serde(default)]
     input_order: Option<String>,
+    #[serde(default)]
+    arch: SpecArch,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SpecArch {
+    #[serde(default)]
+    lstm_hidden: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -278,6 +293,7 @@ impl Spec {
                 Some("modern") => InputOrder::Modern,
                 _ => InputOrder::Legacy,
             },
+            lstm_hidden: self.arch.lstm_hidden,
         }
     }
 }
@@ -313,6 +329,12 @@ struct State {
     /// Tick of the last inventory-screen hotbar hotkey, so the policy can't
     /// strobe the inventory open and closed (see `apply_held_slot`).
     last_hotkey_tick: Arc<AtomicU64>,
+    /// Bumped on `Event::Death` - the closest thing this bot has to a
+    /// training-side episode boundary. The inference worker (`mod
+    /// inference`) watches this to zero its carried LSTM `(h, c)` state for
+    /// a recurrent (`--lstm`) policy, the same point the sim zeros it
+    /// during training. A no-op for the default memoryless MLP policy.
+    episode_gen: Arc<AtomicU64>,
 }
 
 impl Default for State {
@@ -330,6 +352,7 @@ impl Default for State {
             trk: Arc::new(Mutex::new(Tracker::new())),
             my_id: Arc::new(Mutex::new(None)),
             last_hotkey_tick: Arc::new(AtomicU64::new(0)),
+            episode_gen: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -354,6 +377,22 @@ pub(crate) struct Action {
     /// `sim/src/kit.rs::HOTBAR_ACTION_DIM`).
     #[serde(default)]
     pub held_slot: i64,
+    /// Only present for a recurrent (`--lstm`) policy (`consts.lstm_hidden >
+    /// 0`) - see `inference_server.py`'s module docstring. `mod inference`
+    /// carries this straight into the next `/act` request's `lstm_state`
+    /// and never reads its contents itself.
+    #[serde(default)]
+    pub lstm_state: Option<LstmState>,
+}
+
+/// An LSTM `(h, c)` state, opaque to this bot - it only ever round-trips it
+/// between `/act` responses and the next `/act` request, zeroed (by
+/// omitting it) at episode start. See `inference_server.py`'s `lstm_state`
+/// wire contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct LstmState {
+    h: Vec<f32>,
+    c: Vec<f32>,
 }
 
 /// One nearby player block, mirroring `OtherPlayer` in sim/src/protocol.rs.
@@ -590,6 +629,12 @@ async fn main() -> eyre::Result<()> {
         Consts::default()
     });
     info!("observation constants: {consts:?}");
+    if consts.lstm_hidden > 0 {
+        info!(
+            "recurrent policy (lstm_hidden={}) - carrying LSTM state between ticks, reset on death",
+            consts.lstm_hidden
+        );
+    }
 
     let guard_cfg = GuardConfig::from_env();
     info!("legality guard: {guard_cfg:?}");
@@ -597,11 +642,13 @@ async fn main() -> eyre::Result<()> {
     let (obs_tx, obs_rx) = watch::channel::<Option<(u64, Observation)>>(None);
     let action = ActionCell::default();
     let act_url = Arc::new(inference_url);
+    let episode_gen = Arc::new(AtomicU64::new(0));
     tokio::spawn(inference::run_worker(
         http.clone(),
         act_url.clone(),
         obs_rx,
         action.clone(),
+        episode_gen.clone(),
     ));
 
     let state = State {
@@ -614,6 +661,7 @@ async fn main() -> eyre::Result<()> {
         trk: Arc::new(Mutex::new(Tracker::new())),
         my_id: Arc::new(Mutex::new(None)),
         last_hotkey_tick: Arc::new(AtomicU64::new(0)),
+        episode_gen,
     };
 
     let account = match cli.auth {
@@ -706,7 +754,11 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             // `set_direction` corrected it.
             *state.look.lock().unwrap() = (0.0, 0.0);
             state.guard.lock().unwrap().on_respawn();
-            info!("died - respawning automatically, reset tracked look direction");
+            // Same episode boundary the sim zeros a recurrent policy's LSTM
+            // state at (see `State::episode_gen`'s doc comment) - a no-op
+            // for the default non-recurrent policy.
+            state.episode_gen.fetch_add(1, Ordering::Relaxed);
+            info!("died - respawning automatically, reset tracked look direction + LSTM state");
         }
         Event::Disconnect(reason) => {
             // The server dropped us - a kick (anticheat, whitelist, a

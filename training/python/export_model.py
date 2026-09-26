@@ -3,15 +3,21 @@ loaded outside this repo (e.g. by azalea-bot/inference_server.py) to play
 live against the trained bot.
 
 Produces, in --out-dir:
-  policy.pt      - TorchScript module, `forward(obs: Tensor[N, OBS_DIM]) ->
-                   (cont_mean: Tensor[N, 4], cont_std: Tensor[N, 4],
-                    binary_probs: Tensor[N, 5], slot_probs: Tensor[N, S])`.
-                   `cont_mean` is the raw pre-tanh continuous action mean and
-                   `cont_std` its learned per-dim std - the inference server
-                   tanh-squashes the mean for deterministic play, or samples
-                   `tanh(mean + std * randn)` when run with `--sample` so a
-                   live duel can use the trained policy's full distribution
-                   instead of only its mode.
+  policy.pt      - TorchScript module. For an MLP checkpoint (the default),
+                   `forward(obs: Tensor[N, OBS_DIM]) -> (cont_mean, cont_std,
+                   binary_probs, slot_probs)`. For an `--lstm` checkpoint,
+                   `forward(obs: Tensor[1, OBS_DIM], h: Tensor[1, 1,
+                   lstm_hidden], c: Tensor[1, 1, lstm_hidden]) -> (cont_mean,
+                   cont_std, binary_probs, slot_probs, h_out, c_out)` - the
+                   caller (the live bridge) owns and carries `(h, c)` between
+                   ticks; see spec.json's `arch.lstm_hidden` and
+                   azalea-bot/inference_server.py's `lstm_state` request/
+                   response field. `cont_mean` is the raw pre-tanh continuous
+                   action mean and `cont_std` its learned per-dim std - the
+                   inference server tanh-squashes the mean for deterministic
+                   play, or samples `tanh(mean + std * randn)` when run with
+                   `--sample` so a live duel can use the trained policy's
+                   full distribution instead of only its mode.
   spec.json      - obs/action field order + constants, so any downstream
                    consumer (even a non-Python bot) knows how to build the
                    observation vector and interpret the action output.
@@ -58,6 +64,30 @@ class InferencePolicy(nn.Module):
         return mean, cont_std, binary_probs, slot_probs
 
 
+class InferenceRecurrentPolicy(nn.Module):
+    """Same as `InferencePolicy`, but for an `--lstm` checkpoint: the traced
+    module is otherwise stateless between calls, so the caller passes in the
+    LSTM `(h, c)` state from the previous tick and gets the updated state
+    back to carry into the next one - one persistent `(h, c)` per live bot,
+    zeroed at episode/match start (see azalea_bot's `Event::Death` handler
+    and the mod's fight-start reset).
+    """
+
+    def __init__(self, actor_critic: ActorCritic):
+        super().__init__()
+        self.actor_critic = actor_critic
+
+    def forward(self, obs: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
+        mean, log_std, binary_logits, slot_logits, _value, new_hidden = self.actor_critic.forward(
+            obs, (h, c)
+        )
+        cont_std = log_std.exp()
+        binary_probs = torch.sigmoid(binary_logits)
+        slot_probs = torch.softmax(slot_logits, dim=-1)
+        new_h, new_c = new_hidden
+        return mean, cont_std, binary_probs, slot_probs, new_h, new_c
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=str, required=True)
@@ -83,13 +113,6 @@ def main():
         )
 
     lstm_hidden = (ckpt.get("arch") or {}).get("lstm_hidden", 0)
-    if lstm_hidden:
-        raise SystemExit(
-            f"this checkpoint was trained with --lstm (recurrent head, lstm_hidden={lstm_hidden}). "
-            "The live inference bridges (azalea-bot, mod) keep no recurrent state between ticks, so "
-            "an LSTM checkpoint can't be exported for live play. Train the deployable policy without "
-            "--lstm, or implement live recurrent inference first (see TODO.md)."
-        )
 
     # Restore the exact sim-side normalization constants and trunk shape this
     # checkpoint was trained with, so the exported policy + spec.json match.
@@ -115,8 +138,16 @@ def main():
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    wrapped = InferencePolicy(model)
-    example_input = torch.zeros(1, obs_dim)
+    if lstm_hidden:
+        wrapped = InferenceRecurrentPolicy(model)
+        example_input = (
+            torch.zeros(1, obs_dim),
+            torch.zeros(1, 1, lstm_hidden),
+            torch.zeros(1, 1, lstm_hidden),
+        )
+    else:
+        wrapped = InferencePolicy(model)
+        example_input = torch.zeros(1, obs_dim)
 
     # TorchScript is deprecated in recent torch in favour of torch.export, but
     # its on-disk format is far more stable *across* torch versions - which is
@@ -124,7 +155,7 @@ def main():
     # a different machine / torch build, possibly months later). torch.export's
     # `.pt2` serialization makes no such cross-version guarantee yet. Revisit
     # when it does. The policy is a plain feed-forward net (Linear/Tanh/
-    # sigmoid/softmax), so a trace is exact.
+    # sigmoid/softmax [/ LSTM]), so a trace is exact.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=r"`torch\.jit\..*` is deprecated")
         scripted = torch.jit.trace(wrapped, example_input)
@@ -229,7 +260,11 @@ def main():
         "binary_action_dim": BINARY_ACTION_DIM,
         "binary_action_order": ["jump", "attack", "sprint", "use_item", "sneak"],
         "binary_action_threshold": 0.5,
-        "policy_outputs": ["cont_mean", "cont_std", "binary_probs", "slot_probs"],
+        "policy_outputs": (
+            ["cont_mean", "cont_std", "binary_probs", "slot_probs", "lstm_h", "lstm_c"]
+            if lstm_hidden
+            else ["cont_mean", "cont_std", "binary_probs", "slot_probs"]
+        ),
         "input_order": sim_config.get("input_order"),
         "hotbar_slots": features.HOTBAR_SLOTS,
         # held_slot action: `0..hotbar_slots` selects a physical slot (press

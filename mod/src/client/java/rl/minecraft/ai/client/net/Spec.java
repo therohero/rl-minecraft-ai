@@ -22,12 +22,18 @@ public final class Spec {
     public final double bowMaxDrawSeconds;
     public final double hurtInvulnerabilitySeconds;
     public final double binaryActionThreshold;
+    /** 0 for the default memoryless MLP policy; > 0 for an {@code --lstm}
+     *  checkpoint - the width of the {@code (h, c)} state {@link
+     *  rl.minecraft.ai.client.net.InferenceClient} then carries between
+     *  ticks. From {@code arch.lstm_hidden}. */
+    public final int lstmHidden;
 
     public static final Spec DEFAULT = new Spec(new JsonObject());
 
     public Spec(JsonObject root) {
         JsonObject sc = obj(root, "sim_constants");
         JsonObject cc = obj(root, "combat_constants");
+        JsonObject arch = obj(root, "arch");
         this.maxHp = d(sc, "max_hp", 20.0);
         this.matchTimeSeconds = d(sc, "match_time_seconds", 90.0);
         this.arenaRadius = d(sc, "arena_radius", 12.0);
@@ -41,6 +47,7 @@ public final class Spec {
         this.bowMaxDrawSeconds = d(cc, "bow_max_draw_seconds", 1.0);
         this.hurtInvulnerabilitySeconds = d(cc, "hurt_invulnerability_seconds", 1.0);
         this.binaryActionThreshold = d(root, "binary_action_threshold", 0.5);
+        this.lstmHidden = i(arch, "lstm_hidden", 0);
     }
 
     private static JsonObject obj(JsonObject o, String k) {

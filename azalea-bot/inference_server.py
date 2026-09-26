@@ -24,6 +24,29 @@ fields expected - they match sim/src/protocol.rs's `Observation` struct
 field-for-field, since that's what the policy was trained on. Your bot
 integration is responsible for computing those fields (positions,
 velocities, relative opponent position, HP, etc.) from the real game.
+
+## Recurrent (`--lstm`) checkpoints
+
+This server is otherwise stateless - no per-bot session, no bot identity in
+the request - so a checkpoint trained with `--lstm` (see spec.json's
+`arch.lstm_hidden`; 0 for the default memoryless MLP) makes the *caller*
+carry the recurrent state between ticks instead:
+
+    POST /act
+    { ...observation fields..., "lstm_state": {"h": [8 floats], "c": [8 floats]} }
+  -> { ...action fields..., "lstm_state": {"h": [8 floats], "c": [8 floats]} }
+
+Store the `lstm_state` object from each response and send it back as-is on
+the bot's next `/act` call. Omit `lstm_state` (or send `null`) to start from
+a zeroed state - do this once at the start of each match/episode, the same
+point the sim zeros it during training (see ppo_agent.py's `zero_hidden`).
+A stale state from a different bot or a different checkpoint's
+`lstm_hidden` width is silently treated as absent (zeroed) rather than
+erroring, since a garbled hidden state degrades gracefully - the policy
+just starts memory-less that tick - while erroring on it would need the
+caller to track its own `lstm_hidden` just to avoid a 400. For a non-
+recurrent checkpoint (`lstm_hidden` 0), `lstm_state` is not read or
+returned at all - the request/response shape is exactly as above.
 """
 
 import argparse
@@ -51,6 +74,10 @@ class PolicyHandler(BaseHTTPRequestHandler):
     policy = None
     spec = None
     device = None
+    # 0 for a plain MLP checkpoint (the common case - no lstm_state in the
+    # wire contract at all); > 0 for an --lstm checkpoint, set from
+    # spec.json's arch.lstm_hidden once at load time.
+    lstm_hidden = 0
     # When True, sample every action head from the trained policy's
     # distribution (tanh(mean + std*temp*noise), Bernoulli on the binary
     # heads, temperature-scaled categorical on the slot head) instead of
@@ -85,7 +112,13 @@ class PolicyHandler(BaseHTTPRequestHandler):
 
             with torch.no_grad():
                 obs_tensor = torch.as_tensor(obs_vec).unsqueeze(0).to(self.device)
-                cont_mean, cont_std, binary_probs, slot_probs = self.policy(obs_tensor)
+                if self.lstm_hidden:
+                    h_in, c_in = self._read_lstm_state(body.get("lstm_state"))
+                    cont_mean, cont_std, binary_probs, slot_probs, h_out, c_out = self.policy(
+                        obs_tensor, h_in, c_in
+                    )
+                else:
+                    cont_mean, cont_std, binary_probs, slot_probs = self.policy(obs_tensor)
                 cont_mean = cont_mean[0].cpu()
                 cont_std = cont_std[0].cpu()
                 binary_probs = binary_probs[0].cpu()
@@ -122,6 +155,11 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 "sneak": flags.get("sneak", False),
                 "held_slot": held_slot,
             }
+            if self.lstm_hidden:
+                response["lstm_state"] = {
+                    "h": h_out.reshape(-1).cpu().tolist(),
+                    "c": c_out.reshape(-1).cpu().tolist(),
+                }
             self._send_json(200, response)
         except (KeyError, ValueError, json.JSONDecodeError) as e:
             log.warning("bad request on /act: %s", e)
@@ -129,6 +167,29 @@ class PolicyHandler(BaseHTTPRequestHandler):
         except Exception:
             log.exception("unexpected error handling /act request")
             self._send_json(500, {"error": "internal server error, see server log"})
+
+    def _read_lstm_state(self, raw) -> tuple[torch.Tensor, torch.Tensor]:
+        """Parses the request's `lstm_state`, or a zeroed `(h, c)` if it's
+        absent, malformed, or the wrong width for this checkpoint - see the
+        module docstring on why a bad state degrades to zeroed rather than
+        a 400."""
+        n = self.lstm_hidden
+        if isinstance(raw, dict):
+            h_list, c_list = raw.get("h"), raw.get("c")
+            if (
+                isinstance(h_list, list) and isinstance(c_list, list)
+                and len(h_list) == n and len(c_list) == n
+            ):
+                try:
+                    h = torch.tensor(h_list, dtype=torch.float32).view(1, 1, n).to(self.device)
+                    c = torch.tensor(c_list, dtype=torch.float32).view(1, 1, n).to(self.device)
+                    return h, c
+                except (TypeError, ValueError):
+                    pass
+        return (
+            torch.zeros(1, 1, n, device=self.device),
+            torch.zeros(1, 1, n, device=self.device),
+        )
 
     def _send_json(self, status: int, payload: dict):
         body = json.dumps(payload).encode("utf-8")
@@ -197,11 +258,18 @@ def main():
     PolicyHandler.policy.eval()
     with open(spec_path) as f:
         PolicyHandler.spec = json.load(f)
+    PolicyHandler.lstm_hidden = (PolicyHandler.spec.get("arch") or {}).get("lstm_hidden", 0)
 
     # Normalize incoming observations exactly the way the policy was trained
     # to expect - spec.json carries the sim constants that run used.
     features.configure(**PolicyHandler.spec.get("sim_constants", {}))
     log.info("observation normalization: %s", features.active_constants())
+    if PolicyHandler.lstm_hidden:
+        log.info(
+            "recurrent policy (lstm_hidden=%d) - callers must carry lstm_state between ticks, "
+            "zeroed at the start of each match/episode",
+            PolicyHandler.lstm_hidden,
+        )
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), PolicyHandler)

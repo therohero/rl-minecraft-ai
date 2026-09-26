@@ -32,6 +32,10 @@ public final class InferenceClient {
 
     private final AtomicBoolean inFlight = new AtomicBoolean(false);
     private final AtomicReference<Action> latest = new AtomicReference<>(null);
+    /** Carried recurrent state for an {@code --lstm} checkpoint; {@code null}
+     *  means "start from zeroed" (either a non-recurrent policy, or the
+     *  start of a new episode - see {@link #resetLstmState()}). */
+    private volatile JsonObject lastLstmState = null;
     private volatile long lastOkNanos = 0;
     /** null = no reply seen yet; "" = last reply was 200; otherwise the failure text. */
     private volatile String lastError = null;
@@ -62,7 +66,18 @@ public final class InferenceClient {
      */
     public void requestAsync(JsonObject observation) {
         if (!inFlight.compareAndSet(false, true)) return;
-        String body = GSON.toJson(observation);
+        // A carried lstm_state is transport-only - added to a *copy* of the
+        // observation, never the caller's own JsonObject, since that same
+        // object is what gets written to the training dataset
+        // (FightController hands `obs` to both this call and
+        // EpisodeRecorder.record straight after).
+        JsonObject toSend = observation;
+        JsonObject state = lastLstmState;
+        if (state != null) {
+            toSend = observation.deepCopy();
+            toSend.add("lstm_state", state);
+        }
+        String body = GSON.toJson(toSend);
         HttpRequest req = HttpRequest.newBuilder(URI.create(actUrl))
             .timeout(Duration.ofSeconds(2))
             .header("Content-Type", "application/json")
@@ -82,7 +97,11 @@ public final class InferenceClient {
                         maybeWarn("POST /act -> " + lastError);
                         return;
                     }
-                    latest.set(Action.fromJson(GSON.fromJson(resp.body(), JsonObject.class)));
+                    Action action = Action.fromJson(GSON.fromJson(resp.body(), JsonObject.class));
+                    latest.set(action);
+                    // Carried whether or not this checkpoint is recurrent -
+                    // null stays null (see Action.fromJson).
+                    lastLstmState = action.lstmState();
                     lastError = "";
                     long now = System.nanoTime();
                     lastOkNanos = now;
@@ -121,6 +140,19 @@ public final class InferenceClient {
         lastError = null;
         lastOkNanos = 0;
         latencyMsEwma = -1.0;
+        lastLstmState = null;
+    }
+
+    /**
+     * Zero the carried recurrent state without touching the connection
+     * state above - call at every episode boundary (win / loss / disengage
+     * / dimension change), the same point the sim zeros it during
+     * training (see {@code ppo_agent.py}'s {@code zero_hidden}). A no-op
+     * for a non-recurrent policy, which never sets this in the first
+     * place.
+     */
+    public void resetLstmState() {
+        lastLstmState = null;
     }
 
     private static String trim(String s) {
