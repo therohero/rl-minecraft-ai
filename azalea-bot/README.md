@@ -201,6 +201,8 @@ it to stay inside legit-client bounds:
 | attack vs. use | never sends an attack and a `use_item` on the same tick | - |
 | movement while using an item | sends no walk/sprint input while the server has an item in use (or `use_item` is sent this tick). azalea 0.15 doesn't apply vanilla's 0.2x use-item slowdown, so full-speed input is what GrimAC's NoSlow / Simulation checks flag; standing still is the legal choice | - |
 | rotation on item use | holds the previous rotation on any tick that starts an item use. 1.21+ `UseItem` packets embed yaw/pitch and GrimAC's BadPacketsJ requires them to match the rotation the server last received; azalea writes the use packet before the new rotation reaches the server | - |
+| entity right-click | when the crosshair is on another entity, a `use_item` sends a bare `UseItem` packet instead of azalea's entity-interact (which puts the hit location in world coordinates where vanilla sends it entity-relative - GrimAC InvalidInteractCursor) | - |
+| reach margin | attacks only fire within `reach - 0.35`: the client's view of a moving target lags the server's by a tick or two, so exactly-3.0 here can be 3.3 there (GrimAC Reach) | reach 3.0, margin 0.35 |
 | bow release | sends one `ReleaseUseItem` when the policy stops holding a drawn bow (azalea only ever *starts* using; without it the bow stays "in use" server-side and the arrow never fires) | - |
 
 It is **geometry, rate limiting and humanisation only** - it never invents
@@ -213,6 +215,7 @@ AZALEA_GUARD_SMOOTHING        rotation low-pass factor 0.05..1.0 (1.0 = off)
 AZALEA_GUARD_AIM_JITTER_DEG   per-tick rotation tremor sigma (degrees; 0 = off)
 AZALEA_GUARD_AIM_SETTLE_DEG   turn size above which the attack waits a tick
 AZALEA_GUARD_REACH           melee reach in blocks
+AZALEA_GUARD_REACH_MARGIN    blocks subtracted from the reach before swinging (default 0.35)
 AZALEA_GUARD_HITBOX_EXPANSION crosshair hitbox inflation in blocks
 AZALEA_GUARD_MAX_CPS         average attacks/second (min click gap = 1000/this ms)
 AZALEA_GUARD_CLICK_JITTER_MS  sigma of the random jitter on that gap

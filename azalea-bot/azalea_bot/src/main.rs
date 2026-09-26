@@ -109,6 +109,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use azalea::Account;
+use azalea::interact::pick::HitResultComponent;
+use azalea::interact::BlockStatePredictionHandler;
+use azalea::protocol::packets::game::ServerboundUseItem;
+use azalea::protocol::packets::game::s_interact::InteractionHand;
 use azalea::core::direction::Direction;
 use azalea::protocol::packets::game::s_player_action::Action as PlayerAction;
 use azalea::protocol::packets::game::ServerboundPlayerAction;
@@ -1432,6 +1436,25 @@ fn trace_tick(bot: &Client, tick: u64, safe: &SafeAction) {
     );
 }
 
+/// Whether the client's own crosshair pick currently lands on an entity.
+fn crosshair_on_entity(bot: &Client) -> bool {
+    bot.get_component::<HitResultComponent>()
+        .is_some_and(|h| h.as_entity_hit_result().is_some())
+}
+
+/// A bare `ServerboundUseItem` (main hand) with the current rotation - what
+/// `start_use_item` sends when the crosshair is on nothing.
+fn send_plain_use_item(bot: &Client) {
+    let seq = bot
+        .ecs
+        .lock()
+        .get_mut::<BlockStatePredictionHandler>(bot.entity)
+        .map(|mut h| h.start_predicting())
+        .unwrap_or(0);
+    let (y_rot, x_rot) = bot.direction();
+    bot.write_packet(ServerboundUseItem { hand: InteractionHand::MainHand, seq, x_rot, y_rot });
+}
+
 /// Execute a fully-sanitized [`SafeAction`] through Azalea's client API.
 /// Every decision (look integration, sprint legality, which entity to hit,
 /// attack/use mutual exclusion) was already made in `guard::Guard::sanitize`
@@ -1482,7 +1505,17 @@ fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
             // Raise the shield / draw the bow / eat / place / throw a
             // splash potion - azalea resolves what "use" means from the
             // held item and the block/entity under the crosshair.
-            bot.start_use_item();
+            if crosshair_on_entity(bot) {
+                // azalea's entity-interact path sends the hit location in
+                // world coordinates where vanilla sends it relative to the
+                // entity, which GrimAC flags (InvalidInteractCursor). Nothing
+                // useful happens when right-clicking another player anyway,
+                // so send just the plain use-item packet vanilla follows up
+                // with.
+                send_plain_use_item(bot);
+            } else {
+                bot.start_use_item();
+            }
         }
     }
 }

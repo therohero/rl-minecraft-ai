@@ -97,6 +97,11 @@ pub(crate) struct GuardConfig {
     pub aim_settle_deg: f64,
     /// Melee reach, eye to hitbox surface (blocks). Vanilla survival: 3.0.
     pub reach: f64,
+    /// Safety margin (blocks) subtracted from `reach` before swinging. The
+    /// client's view of a moving target lags the server's by a tick or two
+    /// (~0.2-0.4 blocks when sprinting), so an attack that is exactly at
+    /// `reach` here can be past 3.0 there and flag GrimAC's Reach.
+    pub reach_margin: f64,
     /// Block-interaction reach for mining a placed block (`uhc` kit) and for
     /// item placement (blocks). Mirrors `sim/src/config.rs::CombatConfig`'s
     /// `place_reach` (vanilla survival default 4.5) - the sim's mine/place
@@ -131,6 +136,7 @@ impl Default for GuardConfig {
             aim_jitter_deg: 0.4,
             aim_settle_deg: 50.0,
             reach: 3.0,
+            reach_margin: 0.35,
             mine_reach: 4.5,
             hitbox_expansion: 0.1,
             require_line_of_sight: true,
@@ -164,6 +170,9 @@ impl GuardConfig {
         }
         if let Some(v) = env_f64("AZALEA_GUARD_REACH") {
             c.reach = v;
+        }
+        if let Some(v) = env_f64("AZALEA_GUARD_REACH_MARGIN") {
+            c.reach_margin = v.max(0.0);
         }
         if let Some(v) = env_f64("AZALEA_GUARD_MINE_REACH") {
             c.mine_reach = v;
@@ -586,7 +595,7 @@ impl Guard {
             let Some(t) = ray_aabb(eye, dir, min, max) else {
                 continue;
             };
-            if t > self.cfg.reach {
+            if t > self.cfg.reach - self.cfg.reach_margin {
                 continue;
             }
             if self.cfg.require_line_of_sight && segment_hits_block(&world, eye, dir, t) {

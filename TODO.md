@@ -28,7 +28,9 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   Simulation (hundreds, constant ~0.02 / ~0.10 offsets), NoSlow, BadPacketsJ
   (= use-item rotation mismatch) and AntiKB. The guard now holds still and
   releases the bow while an item is in use (NoSlow) and keeps the previous
-  rotation on item-use ticks (BadPacketsJ) - re-run to confirm. Still open:
+  rotation on item-use ticks (BadPacketsJ), swings only within `reach - 0.35`
+  (Reach x1 at 3.33 blocks) and no longer right-clicks entities through azalea's
+  world-coordinate interact (InvalidInteractCursor) - re-run to confirm. Still open:
   Simulation reappeared as soon as a second player joined (cause unknown -
   entity pushing / collision is a guess) and AntiKB is not root-caused. A proper
   use-item slowdown fix is patching azalea's `local_player_ai_step` (`TODO: using
