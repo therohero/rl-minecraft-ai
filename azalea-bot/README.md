@@ -198,6 +198,7 @@ it to stay inside legit-client bounds:
 | sneak | can't toggle crouch faster than a minimum hold (rapid crouch spam is its own flag) | 3 ticks |
 | attack vs. use | never sends an attack and a `use_item` on the same tick | - |
 | movement while using an item | sends no walk/sprint input while the server has an item in use (or `use_item` is sent this tick). azalea 0.15 doesn't apply vanilla's 0.2x use-item slowdown, so full-speed input is what GrimAC's NoSlow / Simulation checks flag; standing still is the legal choice | - |
+| rotation on item use | holds the previous rotation on any tick that starts an item use. 1.21+ `UseItem` packets embed yaw/pitch and GrimAC's BadPacketsJ requires them to match the rotation the server last received; azalea writes the use packet before the new rotation reaches the server | - |
 | bow release | sends one `ReleaseUseItem` when the policy stops holding a drawn bow (azalea only ever *starts* using; without it the bow stays "in use" server-side and the arrow never fires) | - |
 
 It is **geometry, rate limiting and humanisation only** - it never invents

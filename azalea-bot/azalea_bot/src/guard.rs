@@ -208,6 +208,17 @@ fn hold_still_while_using_item(
     }
 }
 
+/// The rotation to send on a tick: the previous one (so the `UseItem`
+/// packet's embedded rotation matches what the server already has) when an
+/// item use starts, otherwise the freshly resolved one.
+fn look_for_item_use(
+    starting_use: bool,
+    resolved: (f64, f64),
+    previous: (f64, f64),
+) -> (f64, f64) {
+    if starting_use { previous } else { resolved }
+}
+
 fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
@@ -307,6 +318,7 @@ impl Guard {
         held_is_mining_tool: bool,
         held_is_bow: bool,
     ) -> SafeAction {
+        let prev_look = *state.look.lock().unwrap();
         let (yaw, pitch) = self.resolve_look(state, raw);
 
         let walk = discretize_walk_direction(raw.move_x, raw.move_z);
@@ -342,6 +354,16 @@ impl Guard {
         // Vanilla never attacks and uses an item on the same tick; an
         // attack (or a mine) always wins (it drops any raised guard anyway).
         let use_item = raw.use_item && attack.is_none() && mine.is_none();
+
+        // 1.21+ `UseItem` packets carry the player's yaw/pitch and GrimAC
+        // (BadPacketsJ) requires them to equal the rotation the server last
+        // received. azalea writes the use packet the same tick it applies
+        // the new rotation, i.e. before that rotation reaches the server, so
+        // hold the previous rotation on any tick that starts an item use.
+        let (yaw, pitch) = look_for_item_use(use_item && !self.cfg.disabled, (yaw, pitch), prev_look);
+        if (yaw, pitch) == prev_look {
+            *state.look.lock().unwrap() = prev_look;
+        }
 
         let release_use = self.resolve_release(server_using_item, use_item, held_is_bow);
         let (walk, sprint) = if self.cfg.disabled {
@@ -753,6 +775,12 @@ fn segment_hits_block(world: &Instance, origin: [f64; 3], dir: [f64; 3], max_t: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn item_use_tick_keeps_the_previously_sent_rotation() {
+        assert_eq!(look_for_item_use(true, (1.0, 0.5), (0.9, 0.4)), (0.9, 0.4));
+        assert_eq!(look_for_item_use(false, (1.0, 0.5), (0.9, 0.4)), (1.0, 0.5));
+    }
+
     #[test]
     fn using_an_item_holds_still_and_drops_sprint() {
         let (w, sp) = hold_still_while_using_item(
