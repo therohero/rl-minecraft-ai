@@ -37,7 +37,7 @@ opt-level = 2
 # Upstream azalea-physics leaves vanilla's cobweb slowdown (`stuckSpeedMultiplier`)
 # as a TODO, so the client moves at full speed inside a web while the server
 # slows it and GrimAC flags Simulation / AntiKB. This vendored copy (MIT, see
-# vendor/azalea-physics/LICENSE*) only adds that one thing in
+# vendor/azalea-physics/LICENSE) only adds that one thing in
 # `collision::move_colliding`; drop the patch once upstream has it.
 [patch.crates-io]
 azalea-physics = { path = "../vendor/azalea-physics" }
