@@ -35,6 +35,10 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   web. Still open: the diagonal Simulation flag has no root cause (the input
   scaling matches vanilla on paper) - find it so diagonals can come back; and
   standing still while using an item should become a proper 0.2x slowed walk.
+  Also one unexplained ~10 s Simulation burst (offsets ~0.12 / ~0.005) on `rlbot`
+  after ~4 min of clean play (20:23, "just jumping around"); a traced bot ran 3.5
+  min clean afterwards. If it recurs, run with `AZALEA_TRACE=1` and line the trace
+  up with the flag timestamp.
 
 ## Mod (`mod/`)
 
