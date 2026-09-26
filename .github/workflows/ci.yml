@@ -15,8 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # azalea needs nightly (azalea_bot/rust-toolchain.toml pins it).
-      - uses: dtolnay/rust-toolchain@nightly
+      # azalea needs nightly, and azalea-entity 0.15 fails to compile on newer
+      # nightlies (E0284), so pin the one it's known to build with.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-29
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
