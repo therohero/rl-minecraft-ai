@@ -178,6 +178,8 @@ closest thing this bot has to training's episode boundary. For the
 default memoryless MLP policy this is a no-op - `lstm_state` is never sent
 or read.
 
+**Debug trace:** `AZALEA_TRACE=1` logs one `azalea_trace` line per tick (position, velocity, on-ground, every input sent, server "using item" flag, yaw/pitch) so a GrimAC flag's timestamp can be matched to what the bot was doing. Off by default.
+
 ### Client-side legality guard (`azalea_bot/src/guard.rs`)
 
 The policy trained in a sim that is vanilla-*shaped*, not vanilla-*exact*,

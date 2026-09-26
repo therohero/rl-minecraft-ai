@@ -794,6 +794,9 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                     held == Item::Bow,
                 );
                 apply_action(&bot, &state, &safe, tick);
+                if trace_enabled() {
+                    trace_tick(&bot, tick, &safe);
+                }
             }
         }
         Event::Death(_) => {
@@ -1408,6 +1411,31 @@ fn is_cobweb(bs: BlockState) -> bool {
 /// Every decision (look integration, sprint legality, which entity to hit,
 /// attack/use mutual exclusion) was already made in `guard::Guard::sanitize`
 /// - this function only performs, it decides nothing.
+/// `AZALEA_TRACE=1`: log one line per tick with the position, velocity and
+/// the exact inputs sent, so the timestamp of a GrimAC flag (server log) can be
+/// matched to what the bot was doing. Off by default (a line per tick).
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AZALEA_TRACE").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+fn trace_tick(bot: &Client, tick: u64, safe: &SafeAction) {
+    let (Some(pos), Some(phys)) = (
+        bot.get_component::<Position>(),
+        bot.get_component::<azalea::entity::Physics>(),
+    ) else {
+        return;
+    };
+    let using = bot.get_component::<AbstractLivingUsingItem>().map(|u| u.0).unwrap_or(false);
+    info!(
+        target: "azalea_trace",
+        "t={tick} pos=({:.3},{:.3},{:.3}) vel=({:.4},{:.4},{:.4}) ground={} walk={:?} sprint={:?} jump={} sneak={} use={} srv_using={using} attack={} yaw={:.2} pitch={:.2}",
+        pos.x, pos.y, pos.z, phys.velocity.x, phys.velocity.y, phys.velocity.z, phys.on_ground(),
+        safe.walk, safe.sprint, safe.jump, safe.sneak, safe.use_item, safe.attack.is_some(),
+        safe.yaw_deg, safe.pitch_deg,
+    );
+}
+
 fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
     // Sprinting is a distinct client state from just moving forward: the
     // server only grants the sprint-knockback bonus / cancels crits when
