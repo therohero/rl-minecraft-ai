@@ -751,6 +751,7 @@ mod tests {
             use_item: false,
             sneak: false,
             held_slot: 0,
+            lstm_state: None,
         }
     }
 }

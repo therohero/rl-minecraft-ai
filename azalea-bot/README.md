@@ -167,6 +167,17 @@ round-trip stale, and the handler logs a warning if inference falls more
 than ~8 ticks behind. The old bridge `await`ed the request inside the
 tick, so a slow model or a network hiccup froze the whole client.
 
+For an `--lstm` checkpoint (`spec.json`'s `arch.lstm_hidden > 0`), this is
+also where the carried `(h, c)` recurrent state lives - the worker
+processes one observation at a time, in order, so a plain local variable
+is enough, no extra synchronisation needed. It's sent as `lstm_state` on
+every `/act` request and read back from the response (see
+"A minimal example request/response" below); `Event::Death` bumps a
+generation counter the worker checks each iteration to zero it, the
+closest thing this bot has to training's episode boundary. For the
+default memoryless MLP policy this is a no-op - `lstm_state` is never sent
+or read.
+
 ### Client-side legality guard (`azalea_bot/src/guard.rs`)
 
 The policy trained in a sim that is vanilla-*shaped*, not vanilla-*exact*,
@@ -345,6 +356,33 @@ same tick the bot attacks triggers the sim's attribute swap; under
 observation fields default to 0 / absent, so a simpler `sword`-kit bridge
 can omit `inventory`, `hotbar`, `projectiles`, `block_view` and the
 kit-only `self_*` fields and just send the melee-relevant state.
+
+### Recurrent (`--lstm`) checkpoints
+
+`export_model.py` also exports a checkpoint trained with `--lstm`, and
+`spec.json`'s `arch.lstm_hidden` tells you whether the one you loaded is
+one (`0` = the default memoryless MLP - the request/response shapes above
+are then exactly as written, nothing else to do). For a recurrent one, the
+server is otherwise stateless (no per-bot session, no bot identity in the
+request), so *you* carry the state between ticks: send back whatever
+`lstm_state` the previous `/act` response gave you, and store the new one
+it returns.
+
+```
+POST /act
+{ ...the observation fields above..., "lstm_state": {"h": [...], "c": [...]} }
+
+200 OK
+{ ...the action fields above..., "lstm_state": {"h": [...], "c": [...]} }
+```
+
+Both `h` and `c` are `arch.lstm_hidden` floats. Omit `lstm_state` (or send
+`null`) to start from a zeroed state - do this once per bot at the start
+of each match/episode, the same point the sim zeros it during training
+(`ppo_agent.py`'s `zero_hidden`); `azalea_bot` does this on `Event::Death`,
+the closest thing it has to that boundary (see `src/inference.rs`). A
+malformed or wrong-width `lstm_state` is treated as absent rather than
+erroring.
 
 The `azalea_bot` reference client fills all of this from live game state -
 real inventory / hotbar / arrow counts, real nearby arrows, a real block

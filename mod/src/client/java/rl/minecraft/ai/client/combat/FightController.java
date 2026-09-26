@@ -571,6 +571,11 @@ public final class FightController {
         outcome = "unknown";
         outcomeReason = "in progress";
         disengageCounter = 0;
+        // Every call site of this method is an episode boundary (kill,
+        // death, disengage, dimension change) - the same point the sim
+        // zeros a recurrent policy's LSTM state during training. A no-op
+        // for the default non-recurrent policy.
+        if (inference != null) inference.resetLstmState();
     }
 
     private void stopInternal(MinecraftClient mc, String episodeOutcome, String episodeReason) {

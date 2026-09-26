@@ -134,7 +134,15 @@ mode / a dimension change all pause the loop and stop recording):
    handful of fields the sim pre-normalises, and nothing else. It's a Java
    port of `azalea_bot`'s `build_observation`; keep the two in sync.
 4. `InferenceClient.requestAsync` POSTs it off-thread; the freshest
-   `Action` already returned is applied by `ActionApplier.apply`.
+   `Action` already returned is applied by `ActionApplier.apply`. For an
+   `--lstm` checkpoint (`spec.lstmHidden > 0`) it also carries the
+   recurrent `(h, c)` state returned as `Action.lstmState` into the next
+   request's `lstm_state` field (a transport-only addition to a *copy* of
+   the observation, never the one that gets recorded below) - zeroed by
+   `FightController.resetEpisodeOutcome` at every episode boundary, the
+   same point the sim zeros it during training. A no-op for the default
+   memoryless MLP policy. See `azalea-bot/README.md`'s "Recurrent
+   (`--lstm`) checkpoints" section for the wire contract.
 5. In `train` mode, `EpisodeRecorder` streams `{t, kit, target, obs,
    action}` to the current `session-*-e<N>.jsonl`; each death / kill /
    disengage / dimension change closes that file with a
@@ -245,8 +253,12 @@ If the configured inference port is free the selftest starts a **mock
 inference server** (`MockInferenceServer`) for the run - a dumb stand-in
 policy (stand still, face the nearest enemy, hold attack) so the full
 observation → `POST /act` → action → `ClientGuard` path is exercised without
-exporting a checkpoint. If a real server is already up (`run_bot_mod.sh`) it
-uses that instead and the assertions run against the real policy's output.
+exporting a checkpoint. It also always echoes an incrementing `lstm_state`,
+so `lstm_state_carried` can check `InferenceClient` actually round-trips a
+recurrent policy's state between ticks instead of dropping it - independent
+of whether any real checkpoint involved is itself recurrent. If a real
+server is already up (`run_bot_mod.sh`) it uses that instead and the
+assertions run against the real policy's output.
 
 Run it unattended with `-Drl.minecraft.ai.debug.autorun=selftest` (or
 `RL_DEBUG_AUTORUN=selftest`, plus `RL_DEBUG_LOG=verbose` for the tick log):
@@ -257,8 +269,10 @@ code 0 (all pass) or 1. Needs a working display for `runClient`.
 Known gaps (solo-only limits, not bugs): the dummy is a client-side entity
 the server can't see, so a hit never lands - `cps_within_cap` only checks the
 ceiling, not that clicks happened - and no death/kill occurs during the run,
-so the outcome-path assertions don't fire. A real second player or the Python
-inference server covers those.
+so the outcome-path assertions don't fire. That also means `lstm_state_carried`
+only covers the between-ticks half of the recurrent-state contract, not that
+it's zeroed at an episode boundary (no boundary fires solo either). A real
+second player or the Python inference server covers those.
 
 Before `/fight`, the policy server has to be running. From the repo root
 (after training at least once with `./run.sh`):

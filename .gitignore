@@ -14,3 +14,4 @@ __pycache__/
 /mod/run/
 /training/datasets/
 CLAUDE.md
+/mod/test-server/
