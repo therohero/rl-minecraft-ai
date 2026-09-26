@@ -1407,10 +1407,6 @@ fn is_cobweb(bs: BlockState) -> bool {
     Box::<dyn BlockTrait>::from(bs).id() == "cobweb"
 }
 
-/// Execute a fully-sanitized [`SafeAction`] through Azalea's client API.
-/// Every decision (look integration, sprint legality, which entity to hit,
-/// attack/use mutual exclusion) was already made in `guard::Guard::sanitize`
-/// - this function only performs, it decides nothing.
 /// `AZALEA_TRACE=1`: log one line per tick with the position, velocity and
 /// the exact inputs sent, so the timestamp of a GrimAC flag (server log) can be
 /// matched to what the bot was doing. Off by default (a line per tick).
@@ -1436,6 +1432,10 @@ fn trace_tick(bot: &Client, tick: u64, safe: &SafeAction) {
     );
 }
 
+/// Execute a fully-sanitized [`SafeAction`] through Azalea's client API.
+/// Every decision (look integration, sprint legality, which entity to hit,
+/// attack/use mutual exclusion) was already made in `guard::Guard::sanitize`
+/// - this function only performs, it decides nothing.
 fn apply_action(bot: &Client, state: &State, safe: &SafeAction, tick: u64) {
     // Sprinting is a distinct client state from just moving forward: the
     // server only grants the sprint-knockback bonus / cancels crits when
