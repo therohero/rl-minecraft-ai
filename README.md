@@ -147,12 +147,19 @@ silently ignores `deploy.resources`, so use `run_docker.sh` there.
   hardware it sees at *runtime*, which is the wrong question when building
   an image. The [`Dockerfile`](Dockerfile)'s two targets pin a backend each
   instead: the GPU `runtime` target installs `cu128` (torch >= 2.7, the
-  first build with Blackwell/sm_120 kernels) - override for an older card or
-  a different CUDA with `--build-arg TORCH_INDEX_URL=...`:
+  first build with Blackwell/sm_120 kernels) - a **pre-Ampere card (e.g. a
+  GTX 10-series/Pascal) has no kernels in that wheel at all** and fails at
+  runtime with `CUDA error: no kernel image is available for execution on
+  the device`, not at build time - so override for an older card or a
+  different CUDA with `--build-arg TORCH_INDEX_URL=...` (and, if that CUDA
+  index doesn't carry `torch>=2.7`, `--build-arg TORCH_SPEC=...` too):
 
   ```bash
   podman build --target runtime --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 -t rl-minecraft-ai-train .
   ```
+
+  `run_docker.sh` forwards the same two knobs as env vars so you don't need
+  to drop to a raw `build`/`run`: `RL_TORCH_INDEX_URL` and `RL_TORCH_SPEC`.
 
   The CPU `runtime-cpu` target installs the plain `.../whl/cpu` wheel the
   same way `ensure_deps.py` would on a GPU-less machine.

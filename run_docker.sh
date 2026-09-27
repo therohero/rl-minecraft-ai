@@ -28,6 +28,16 @@
 #                                    CUDA torch) - ignored for RL_DOCKER_TARGET=cpu
 #   RL_DOCKER_IMAGE=<name>           image tag to build/run (default
 #                                    rl-minecraft-ai-train[-cpu])
+#   RL_TORCH_INDEX_URL=<url>         override the torch wheel index baked
+#                                    into the image (gpu target only) - e.g.
+#                                    an older CUDA build for a pre-Ampere
+#                                    card whose kernels the default cu128
+#                                    wheel doesn't ship:
+#                                      RL_TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+#   RL_TORCH_SPEC=<pip spec>         override the torch version spec that
+#                                    goes with RL_TORCH_INDEX_URL (default
+#                                    "torch>=2.7"; an older CUDA index may
+#                                    not carry that version, e.g. "torch>=2.4")
 
 set -euo pipefail
 
@@ -127,12 +137,18 @@ mkdir -p "$SCRIPT_DIR/training/checkpoints"
 TTY_ARGS=()
 [ -t 0 ] && [ -t 1 ] && TTY_ARGS=(-it)
 
+BUILD_ARGS=()
+if [ "$TARGET" != "cpu" ]; then
+    [ -n "${RL_TORCH_INDEX_URL:-}" ] && BUILD_ARGS+=(--build-arg "TORCH_INDEX_URL=$RL_TORCH_INDEX_URL")
+    [ -n "${RL_TORCH_SPEC:-}" ] && BUILD_ARGS+=(--build-arg "TORCH_SPEC=$RL_TORCH_SPEC")
+fi
+
 if [ "$TARGET" = "cpu" ]; then
     log "building image (first run pulls CPU torch - ~200 MB - and compiles the sim)..."
 else
     log "building image (first run pulls CUDA torch - a few GB - and compiles the sim)..."
 fi
-"$ENGINE" build --target "$DOCKERFILE_TARGET" -t "$IMAGE" "$SCRIPT_DIR" || die "image build failed - see errors above"
+"$ENGINE" build --target "$DOCKERFILE_TARGET" "${BUILD_ARGS[@]}" -t "$IMAGE" "$SCRIPT_DIR" || die "image build failed - see errors above"
 
 log "starting training in a container (Ctrl+C to stop; checkpoints -> training/checkpoints/)..."
 exec "$ENGINE" run --rm --init \
