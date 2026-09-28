@@ -30,15 +30,22 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   bare `UseItem` when the crosshair is on an entity (InvalidInteractCursor),
   throttles `UseItem` to vanilla's 4-tick repeat (Post) and drops diagonal walking
   (Simulation: 0 flags in 40 s with the real policy, was a flag every few
-  seconds). Still to verify with a *real player hitting the bot*: AntiKB, and the
-  vendored cobweb-slowdown patch (`vendor/azalea-physics`) with the bot stuck in a
-  web. Still open: the diagonal Simulation flag has no root cause (the input
-  scaling matches vanilla on paper) - find it so diagonals can come back; and
-  standing still while using an item should become a proper 0.2x slowed walk.
-  Also one unexplained ~10 s Simulation burst (offsets ~0.12 / ~0.005) on `rlbot`
-  after ~4 min of clean play (20:23, "just jumping around"); a traced bot ran 3.5
-  min clean afterwards. If it recurs, run with `AZALEA_TRACE=1` and line the trace
-  up with the flag timestamp.
+  seconds). AntiKB + the vendored cobweb-slowdown patch (`vendor/azalea-physics`)
+  are now also confirmed clean (2026-09-28, ~12 min session, no trained policy -
+  a scripted non-policy bot instead, to isolate guard.rs from policy behaviour):
+  0 flags through real zombie-melee knockback while stuck in a web, two creeper
+  explosions, 5 deaths/respawns, and full bow-draw and crossbow-charge/fire
+  cycles. Only gap left vs. "real player hitting the bot": it was a zombie/mob,
+  not a human - the knockback source is real server-side combat either way, but
+  worth a human-hit pass too if anything looks off later. Still open: the
+  diagonal Simulation flag has no root cause (the input scaling matches vanilla
+  on paper) - find it so diagonals can come back; and standing still while using
+  an item should become a proper 0.2x slowed walk. Also one unexplained ~10 s
+  Simulation burst (offsets ~0.12 / ~0.005) on `rlbot` after ~4 min of clean play
+  (20:23, "just jumping around"); a traced bot ran 3.5 min clean afterwards, and
+  the 2026-09-28 session (~12 min, past that mark) didn't reproduce it either. If
+  it recurs, run with `AZALEA_TRACE=1` and line the trace up with the flag
+  timestamp.
 
 ## Mod (`mod/`)
 
