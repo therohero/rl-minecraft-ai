@@ -19,10 +19,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use env_logger::fmt::style::AnsiColor;
 use log::{info, warn};
 use serde::Serialize;
 use tokio::sync::watch;
 
+use crate::color::paint;
 use crate::{Action, LstmState, Observation};
 
 /// Everything one `/act` round-trip needs, snapshotted from `State` the
@@ -154,7 +156,7 @@ impl RoundTripStats {
         }
         if self.since_last_report.elapsed() >= Self::REPORT_EVERY && self.count > 0 {
             let mean_ms = self.sum.as_secs_f64() * 1e3 / self.count as f64;
-            info!(
+            let line = format!(
                 "inference /act round-trip (last {}s): mean {:.1} ms, max {:.1} ms, {}/{} over {} ms",
                 Self::REPORT_EVERY.as_secs(),
                 mean_ms,
@@ -163,6 +165,13 @@ impl RoundTripStats {
                 self.count,
                 Self::BUDGET.as_millis(),
             );
+            // Highlight when a meaningful fraction of ticks missed budget -
+            // that's the signal the model server is falling behind.
+            if self.over_budget * 5 >= self.count {
+                info!("{}", paint(AnsiColor::Yellow, &line));
+            } else {
+                info!("{line}");
+            }
             *self = RoundTripStats::new();
         }
     }

@@ -98,6 +98,7 @@
 //! fights this bot's own `env_logger` for the global logger and prints
 //! "Could not set global logger as it is already set" on every startup.
 
+mod color;
 mod guard;
 mod inference;
 mod tracker;
@@ -137,9 +138,11 @@ use azalea::registry::builtin::{ItemKind, Potion};
 use azalea::world::MinecraftEntityId;
 use azalea::{ClientBuilder, SprintDirection, WalkDirection};
 use bevy_ecs::prelude::{Entity, With, Without};
+use env_logger::fmt::style::AnsiColor;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
+use color::paint;
 use guard::{Guard, GuardConfig, SafeAction};
 use inference::ActionCell;
 use tracker::{Relation, Tracker};
@@ -634,7 +637,7 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    color::init_logger();
 
     let cli = Cli::parse(std::env::args().skip(1))?;
     let server_address = cli.server;
@@ -642,8 +645,14 @@ async fn main() -> eyre::Result<()> {
     let inference_url = cli.inference_url;
 
     info!(
-        "connecting to {server_address} as '{bot_username}' ({} auth), using inference server at {inference_url}",
-        cli.auth
+        "{}",
+        paint(
+            AnsiColor::Cyan,
+            &format!(
+                "connecting to {server_address} as '{bot_username}' ({} auth), using inference server at {inference_url}",
+                cli.auth
+            ),
+        )
     );
 
     // Inference runs off the tick loop now (see `mod inference`), so a slow
@@ -720,7 +729,7 @@ async fn main() -> eyre::Result<()> {
         .set_state(state)
         .start(account, server_address.as_str())
         .await;
-    info!("client exited: {exit:?}");
+    info!("{}", paint(AnsiColor::Cyan, &format!("client exited: {exit:?}")));
 
     Ok(())
 }
@@ -739,7 +748,7 @@ async fn fetch_spec(http: &reqwest::Client, inference_url: &str) -> eyre::Result
 async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
     match event {
         Event::Login => {
-            info!("logged in");
+            info!("{}", paint(AnsiColor::Green, "logged in"));
         }
         Event::Spawn => {
             // The bot's own network entity id is only knowable once it's in
@@ -747,7 +756,7 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             // from everyone else's.
             let id = bot.minecraft_entity_by_ecs_entity(bot.entity);
             *state.my_id.lock().unwrap() = id;
-            info!("spawned (entity id {id:?})");
+            info!("{}", paint(AnsiColor::Green, &format!("spawned (entity id {id:?})")));
         }
         Event::Packet(packet) => {
             let my_name = bot.username();
@@ -823,7 +832,10 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             // state at (see `State::episode_gen`'s doc comment) - a no-op
             // for the default non-recurrent policy.
             state.episode_gen.fetch_add(1, Ordering::Relaxed);
-            info!("died - respawning automatically, reset tracked look direction + LSTM state");
+            info!(
+                "{}",
+                paint(AnsiColor::Yellow, "died - respawning automatically, reset tracked look direction + LSTM state")
+            );
         }
         Event::Disconnect(reason) => {
             // The server dropped us - a kick (anticheat, whitelist, a

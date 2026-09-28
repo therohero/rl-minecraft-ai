@@ -42,12 +42,63 @@ import features
 from device import resolve_device
 from env import DEFAULT_SIM_BINARY, SelfPlayArenaEnv
 from frame_stack import FrameStacker
-from logging_setup import get_logger
+from logging_setup import get_logger, paint
 from metrics import MetricsWriter
 from opponents import OpponentPool, benchmark_slot_mask, opponent_slot_mask
 from ppo_agent import ActorCritic, RolloutBuffer, ppo_update
 
 log = get_logger(__name__)
+
+
+def _fmt_count(n: float) -> str:
+    """Abbreviate a step/sample count for the progress line (2453000 -> '2.45M')."""
+    if not np.isfinite(n):
+        return "?"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(int(n))
+
+
+def _rate_color(rate: float) -> str:
+    """green/yellow/red for a win-rate-like fraction in [0, 1]."""
+    if not np.isfinite(rate):
+        return "white"
+    if rate >= 0.5:
+        return "green"
+    if rate >= 0.35:
+        return "yellow"
+    return "red"
+
+
+def _format_progress_line(
+    *, update, total_env_steps, sps, avg_return, win_rate, vs_scripted,
+    scripted_matches, stats, entropy_coef, lr_now,
+) -> str:
+    """One colored, aligned line summarizing a PPO update: headline metrics
+    (return/win rates), then PPO loss diagnostics, then schedule state -
+    dimmed so the headline numbers are what catches the eye scrolling by."""
+    return_color = "white" if not np.isfinite(avg_return) else ("green" if avg_return >= 0 else "red")
+    return_str = paint(return_color, f"{avg_return:+.2f}")
+    win_str = paint(_rate_color(win_rate), f"{win_rate * 100:.0f}%")
+    vs_scripted_str = paint(_rate_color(vs_scripted), f"{vs_scripted * 100:.0f}%")
+    headline = (
+        f"update={update} env_steps={_fmt_count(total_env_steps)} "
+        f"steps/sec={paint('cyan', f'{sps:.0f}')} avg_return={return_str} "
+        f"win={win_str} vs_scripted={vs_scripted_str} (n={scripted_matches})"
+    )
+    diagnostics = paint(
+        "white",
+        f"pol_loss={stats['policy_loss']:.4f} val_loss={stats['value_loss']:.4f} "
+        f"entropy={stats['entropy']:.3f} kl={stats['approx_kl']:.4f} "
+        f"clip={stats['clip_frac'] * 100:.0f}%",
+        dim=True,
+    )
+    schedule = paint("white", f"entropy_coef={entropy_coef:.5f} lr={lr_now:.2e}", dim=True)
+    sep = paint("white", "|", dim=True)
+    return f"{headline} {sep} {diagnostics} {sep} {schedule}"
+
 
 # CLI flag -> (config section, key). `None` section means a top-level key.
 _SIM_CONFIG_OVERRIDES = {
@@ -1222,24 +1273,19 @@ def main():
                 win_rate = recent_wins / recent_matches if recent_matches else float("nan")
                 vs_scripted = scripted_wins / scripted_matches if scripted_matches else float("nan")
                 log.info(
-                    "update=%d env_steps=%d steps/sec=%.0f avg_return=%.2f "
-                    "win_rate=%.2f win_vs_scripted=%.2f (n=%d) "
-                    "policy_loss=%.4f value_loss=%.4f entropy=%.4f approx_kl=%.4f clip_frac=%.2f "
-                    "entropy_coef=%.5f lr=%.2e",
-                    update,
-                    total_env_steps,
-                    sps,
-                    avg_return,
-                    win_rate,
-                    vs_scripted,
-                    scripted_matches,
-                    stats["policy_loss"],
-                    stats["value_loss"],
-                    stats["entropy"],
-                    stats["approx_kl"],
-                    stats["clip_frac"],
-                    entropy_coef,
-                    lr_now,
+                    "%s",
+                    _format_progress_line(
+                        update=update,
+                        total_env_steps=total_env_steps,
+                        sps=sps,
+                        avg_return=avg_return,
+                        win_rate=win_rate,
+                        vs_scripted=vs_scripted,
+                        scripted_matches=scripted_matches,
+                        stats=stats,
+                        entropy_coef=entropy_coef,
+                        lr_now=lr_now,
+                    ),
                 )
                 if metrics.active:
                     metrics.log(update, {
