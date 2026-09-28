@@ -53,15 +53,25 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   `azalea_bot` now supports live LSTM inference, live frame stacking, live
   splash potions (mapping + throwing), and live `uhc` mining (see
   azalea-bot/README.md for how each works and the wire-protocol additions
-  `inference_server.py` now accepts); the mod (`ObservationBuilder` /
-  `InferenceClient` / `FightController`'s action application) doesn't have
-  any of these yet, so a `--lstm`, `--frame-stack N>1`, splash-potion, or
-  `uhc`-mining checkpoint is still dead when played through `/fight`.
+  `inference_server.py` now accepts). The mod caught up on LSTM (`InferenceClient`
+  / `FightController` / `Action` / `Spec` now thread `lstm_state`, and the
+  selftest's `lstm_state_carried` check covers it), but frame stacking,
+  splash-potion throwing, and `uhc` mining still aren't wired into
+  `FightController`'s action application, so a `--frame-stack N>1`,
+  splash-potion, or `uhc`-mining checkpoint is still dead when played through
+  `/fight`.
 - [ ] **Tune the mod virtual-mouse against a real anticheat.** `ClientGuard`'s
-  new mouse model has plausible-but-guessed defaults (`max_yaw_accel_deg`,
-  `aim_latency_ticks`, `max_cps`, tremor). Validate / retune them against
-  GrimAC (and ideally Vulcan) on a test server; consider a small
-  rotation-log dump to eyeball the delta distribution.
+  mouse model has plausible-but-guessed defaults (`max_yaw_accel_deg`,
+  `aim_latency_ticks`, `max_cps`, tremor). An initial pass (2026-09-14, the
+  `RL_DEBUG_AUTORUN=realserver` unattended real-server run against a local
+  Paper 1.21.11 + GrimAC 2.3.74) found ClientGuard needed no retuning: a
+  continuous 3-minute `/fight` against a client-side dummy produced zero
+  combat-related violations (no Reach, rotation/BadPackets, or
+  MultiActions/killaura checks), only two trivial non-recurring Timer VL 1-2
+  in the first second (harness setup, not the fight). Still open: that only
+  exercised a stationary target with one account - a real second player (and
+  ideally Vulcan too) is the remaining gap; consider a small rotation-log dump
+  to eyeball the delta distribution if a real-player run turns up anything.
 - [ ] **`/fight reload`.** Re-read `rl-minecraft-ai.properties` without a
   client restart.
 - [ ] **Extend the debug-harness selftest to cover the outcome path.** The
