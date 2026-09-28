@@ -43,8 +43,17 @@ BRIDGE_DIR="$SCRIPT_DIR/azalea-bot"
 VIAPROXY_DIR="$BRIDGE_DIR/viaproxy"
 VIAPROXY_PORT=25568
 
-log() { printf '[run_bot.sh] %s\n' "$*"; }
-die() { printf '[run_bot.sh] ERROR: %s\n' "$*" >&2; exit 1; }
+# Colored status output; auto-disabled when stdout isn't a terminal (e.g.
+# redirected to a file) or NO_COLOR is set, so logs stay plain ASCII.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_RED=$'\033[1;31m'; C_RESET=$'\033[0m'
+else
+    C_CYAN=''; C_GREEN=''; C_RED=''; C_RESET=''
+fi
+
+log() { printf '%s[run_bot.sh]%s %s\n' "$C_CYAN" "$C_RESET" "$*"; }
+ok()  { printf '%s[run_bot.sh]%s %s%s%s\n' "$C_CYAN" "$C_RESET" "$C_GREEN" "$*" "$C_RESET"; }
+die() { printf '%s[run_bot.sh] ERROR:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 # Whether azalea-bot/viaproxy/saves.json already has at least one saved
 # ViaProxy account (any type - offline/microsoft/bedrock).
@@ -80,7 +89,7 @@ ensure_viaproxy_microsoft_account() {
     # script's stdout) so the code/URL and any errors are visible live.
     ( cd "$VIAPROXY_DIR" && printf 'account add microsoft\nstop\n' | java -jar "$JAR" cli )
     viaproxy_has_saved_account || die "ViaProxy still has no saved account after the login attempt - see the output above and try again"
-    log "ViaProxy account saved."
+    ok "ViaProxy account saved."
 }
 
 # Check dependencies
@@ -137,7 +146,7 @@ else
     log "Waiting for inference server to start..."
     for _ in $(seq 1 20); do
         if port_open "$INFERENCE_PORT"; then
-            log "Inference server successfully started."
+            ok "Inference server successfully started."
             break
         fi
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -191,7 +200,7 @@ EOF
         sleep 0.5
     done
     port_open "$VIAPROXY_PORT" || { cat "$VIAPROXY_DIR/viaproxy.log" >&2; die "ViaProxy did not open $VIAPROXY_PORT within 30s"; }
-    log "ViaProxy is up."
+    ok "ViaProxy is up."
     SERVER_ADDR="127.0.0.1:$VIAPROXY_PORT"
     # The bot itself always talks to the *local*, unauthenticated ViaProxy -
     # AUTH picked ViaProxy's own upstream auth-method above, not the bot's.
@@ -201,6 +210,6 @@ else
 fi
 
 # 4. Connect the bot
-log "Connecting the bot to $SERVER_ADDR as '$USERNAME' (auth: $BOT_AUTH)..."
+ok "Connecting the bot to $SERVER_ADDR as '$USERNAME' (auth: $BOT_AUTH)..."
 cd "$BOT_DIR"
 cargo run --release -- "$SERVER_ADDR" "$USERNAME" "$INFERENCE_URL" --auth "$BOT_AUTH"
