@@ -290,7 +290,43 @@ Before `/fight`, the policy server has to be running. From the repo root
 (or by hand: `cd azalea-bot && python inference_server.py --model-dir ./model --port 8800`,
 after exporting a checkpoint with `training/python/export_model.py`).
 
-## Fidelity & limitations
+### Real-server run (anticheat validation)
+
+The selftest's dummy has no server-side entity, so it can't say anything
+about how a **real** server anticheat (GrimAC, Vulcan, ...) sees `ClientGuard`'s
+packet stream - the whole reason `ClientGuard` exists (see [`azalea-bot`'s
+guard section](../azalea-bot/README.md#client-side-legality-guard-azalea_botsrcguardrs)).
+`-Drl.minecraft.ai.debug.autorun=realserver` (or `RL_DEBUG_AUTORUN=realserver`)
+closes that gap: the harness connects the dev client straight to a real
+server address - via `ConnectScreen.connect` in code, not by clicking through
+the multiplayer menu, so it's as unattended as the selftest - equips a kit,
+spawns a client-side dummy target (same limitation as the selftest: no real
+hit registration, but every rotation / click-cadence / attack-swing *packet*
+it drives is real network traffic the server's anticheat inspects), fights
+for a configurable duration, then closes the client. Needs:
+
+```bash
+RL_DEBUG_AUTORUN=realserver RL_DEBUG_SERVER=127.0.0.1:25566 \
+RL_DEBUG_RUN_TICKS=3600 ./gradlew runClient   # 3600 ticks ~= 3 minutes
+```
+
+- `RL_DEBUG_SERVER` (required): `host:port` of a server you're authorised to
+  test against - e.g. a local Paper server with the anticheat plugin installed
+  (`online-mode=false` so the dev client's account can join; op that account
+  so `/give`/`/clear` land, or the run just fights bare-handed).
+- `RL_DEBUG_KIT` (default `sword`), `RL_DEBUG_RUN_TICKS` (default `1200` =
+  1 minute), `RL_DEBUG_TRAIN` (default `false` - `true` also records a
+  dataset, same as `/fight train`).
+
+It makes **no pass/fail assertion of its own** - the verdict lives in the
+server's own anticheat logs / violation history (GrimAC: console alerts, or
+`/grim history <player>` / its SQLite store), which this harness has no way
+to read from inside the client. Watch that while it runs, or check it after.
+
+Nothing here is committed: a throwaway test-server directory (Paper +
+anticheat plugin jar + `eula.txt` + local-only config) works well for this
+and should live outside the repo or under a gitignored path - never commit
+server jars, worlds, or RCON/account credentials.
 
 The observation is a best-effort port of
 `azalea-bot/azalea_bot/src/main.rs::build_observation` (itself a mirror of

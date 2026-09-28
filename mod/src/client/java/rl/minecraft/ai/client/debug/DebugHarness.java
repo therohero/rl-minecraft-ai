@@ -5,6 +5,9 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.TitleScreen;
+import net.minecraft.client.gui.screen.multiplayer.ConnectScreen;
+import net.minecraft.client.network.ServerAddress;
+import net.minecraft.client.network.ServerInfo;
 import net.minecraft.text.Text;
 
 import rl.minecraft.ai.client.RlConfig;
@@ -47,6 +50,15 @@ public final class DebugHarness {
     private static int lifeTicks;
     private static int joinedTicks;
 
+    private static boolean autorunRealserver;
+    private static String realserverAddress;
+    private static String realserverKit;
+    private static int realserverRunTicks;
+    private static boolean realserverTrain;
+    private static boolean realserverConnectTriggered;
+    private static boolean realserverLaunched;
+    private static volatile RealServerRun activeRealServerRun;
+
     /** Reflection entrypoint - signature must stay {@code (RlConfig, FightController)}. */
     public static void init(RlConfig config, FightController fightController) {
         cfg = config;
@@ -55,6 +67,18 @@ public final class DebugHarness {
 
         String autorun = prop("rl.minecraft.ai.debug.autorun", "RL_DEBUG_AUTORUN", "");
         autorunSelftest = autorun.equalsIgnoreCase("selftest");
+        autorunRealserver = autorun.equalsIgnoreCase("realserver");
+        if (autorunRealserver) {
+            realserverAddress = prop("rl.minecraft.ai.debug.server", "RL_DEBUG_SERVER", "");
+            realserverKit = prop("rl.minecraft.ai.debug.kit", "RL_DEBUG_KIT", "sword");
+            realserverRunTicks = Integer.parseInt(prop("rl.minecraft.ai.debug.run_ticks", "RL_DEBUG_RUN_TICKS", "1200"));
+            realserverTrain = Boolean.parseBoolean(prop("rl.minecraft.ai.debug.train", "RL_DEBUG_TRAIN", "false"));
+            if (realserverAddress.isBlank()) {
+                RlMinecraftAiClient.LOGGER.error(
+                    "autorun=realserver needs -Drl.minecraft.ai.debug.server / RL_DEBUG_SERVER=<host:port>");
+                autorunRealserver = false;
+            }
+        }
 
         controller.setTickTap((obs, action) -> {
             try {
@@ -71,7 +95,7 @@ public final class DebugHarness {
 
         ClientTickEvents.END_CLIENT_TICK.register(DebugHarness::onEndTick);
 
-        if (autorunSelftest) {
+        if (autorunSelftest || autorunRealserver) {
             ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
                 autorunJoined = true;
                 joinedTicks = 0;
@@ -80,7 +104,7 @@ public final class DebugHarness {
         }
 
         RlMinecraftAiClient.LOGGER.info("debug harness ready (log={}, autorun={})",
-            log.level(), autorunSelftest ? "selftest" : "none");
+            log.level(), autorunSelftest ? "selftest" : (autorunRealserver ? "realserver" : "none"));
     }
 
     public static DebugLog log() {
@@ -113,6 +137,31 @@ public final class DebugHarness {
             }
         }
 
+        RealServerRun r = activeRealServerRun;
+        if (r != null) {
+            if (!r.finished()) {
+                try {
+                    r.tick(mc);
+                } catch (Throwable e) {
+                    RlMinecraftAiClient.LOGGER.warn("realserver run tick error - aborting and closing client", e);
+                    r.abort();
+                    activeRealServerRun = null;
+                    log.flushAndClose();
+                    mc.scheduleStop();
+                }
+            } else {
+                activeRealServerRun = null;
+                RlMinecraftAiClient.LOGGER.info("autorun: realserver run finished - closing client");
+                log.flushAndClose();
+                mc.scheduleStop();
+            }
+        }
+
+        if (autorunRealserver) {
+            onRealserverAutorunTick(mc);
+            return;
+        }
+
         if (!autorunSelftest || autorunTestLaunched) return;
 
         // 1. no world yet: open the vanilla test-world screen once the title
@@ -137,6 +186,35 @@ public final class DebugHarness {
             startSelfTest(m ->
                 RlMinecraftAiClient.LOGGER.info("[autorun] {}", m.getString().replaceAll("§.", "")),
                 true);
+        }
+    }
+
+    /** Drives the -Drl.minecraft.ai.debug.autorun=realserver flow: connect once the title
+     * screen settles, then launch {@link RealServerRun} once the join has had time to settle. */
+    private static void onRealserverAutorunTick(MinecraftClient mc) {
+        if (realserverLaunched) return;  // launched exactly once - even after it finishes
+
+        if (mc.world == null) {
+            if (!realserverConnectTriggered && lifeTicks > 60 && mc.currentScreen instanceof TitleScreen) {
+                realserverConnectTriggered = true;
+                RlMinecraftAiClient.LOGGER.info("autorun: connecting to {}", realserverAddress);
+                mc.execute(() -> {
+                    ServerAddress addr = ServerAddress.parse(realserverAddress);
+                    ServerInfo info = new ServerInfo("rl-debug", realserverAddress, ServerInfo.ServerType.OTHER);
+                    ConnectScreen.connect(mc.currentScreen, mc, addr, info, false, null);
+                });
+            }
+            return;
+        }
+
+        if (autorunJoined && ++joinedTicks > 40) {
+            realserverLaunched = true;
+            RlMinecraftAiClient.LOGGER.info(
+                "autorun: starting realserver run (kit={}, run_ticks={}, train={})",
+                realserverKit, realserverRunTicks, realserverTrain);
+            activeRealServerRun = new RealServerRun(cfg, controller,
+                m -> RlMinecraftAiClient.LOGGER.info("[autorun] {}", m.getString().replaceAll("§.", "")),
+                realserverKit, realserverRunTicks, realserverTrain);
         }
     }
 
