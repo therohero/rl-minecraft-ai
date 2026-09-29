@@ -66,7 +66,7 @@ class SimConstants:
     match_time_seconds: float = 90.0
     arena_radius: float = 12.0
     terrain_max_amplitude: float = 3.0
-    max_look_delta: float = 3.0
+    max_look_delta: float = 0.2
     max_ping_ms: float = 100.0
     max_observed_enemies: int = 3
     max_observed_teammates: int = 2

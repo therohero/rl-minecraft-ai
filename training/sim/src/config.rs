@@ -678,9 +678,12 @@ pub struct SimConfig {
     ///
     /// Vanilla has **no** per-tick limit on how far the crosshair moves - a
     /// mouse flick can snap 180 deg in one tick. This cap is a deliberate,
-    /// non-vanilla regularizer: ~3.0 rad/tick (~170 deg) still allows flick
-    /// shots and hard turns, but not the instant teleport-aim a policy would
-    /// otherwise learn and no human could reproduce against a live server.
+    /// non-vanilla regularizer, and the default (0.2 rad/tick, ~11 deg) is
+    /// tight on purpose: at the old 3.0 rad/tick (~170 deg) a policy learned
+    /// to spin at full speed and spam attack, sweeping the crosshair over
+    /// the enemy - it beat the scripted bot in the sim but, live, the legality
+    /// guard (rightly) dropped nearly every swing. A human-reproducible turn
+    /// rate forces real tracking instead.
     /// Changing it rescales the yaw/pitch action head, so a checkpoint
     /// trained at one value does not transfer to another.
     pub max_look_delta: f32,
@@ -741,7 +744,7 @@ impl Default for SimConfig {
             match_time_seconds: 90.0,
             terrain_max_amplitude: 3.0,
             terrain_flat_only: false,
-            max_look_delta: 3.0,
+            max_look_delta: 0.2,
             sprint_forward_threshold: 0.5,
             slope_sample_distance: 1.0,
             min_ping_ms: 5.0,

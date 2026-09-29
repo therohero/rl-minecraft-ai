@@ -15,7 +15,7 @@
   "match_time_seconds": 90.0,
   "terrain_max_amplitude": 3.0,
   "terrain_flat_only": false,
-  "max_look_delta": 3.0,
+  "max_look_delta": 0.2,
   "sprint_forward_threshold": 0.5,
   "slope_sample_distance": 1.0,
   "min_ping_ms": 5.0,

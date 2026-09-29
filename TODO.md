@@ -13,6 +13,15 @@ notes in the code — prune / reprioritise freely. One branch per item (see
   vs the scripted bot is empirical - tune the weights from the first few
   thousand updates (the unshaped run stalled with entropy flat ~12, returns ~0).
 
+- [ ] **Confirm the tighter `max_look_delta` default (0.2 rad/tick) stops the
+  spin-and-spam exploit.** With the old 3.0 the policy learned to spin at full
+  speed and spam attack (great vs the scripted bot in the sim, but the live
+  guard dropped nearly every swing). The default changed on
+  `fix/look-delta-default`; merge it once a fresh run with the new default,
+  tried live with the guard **on**, aims and lands hits. If it still spins,
+  add a turn-speed penalty to `arena.rs::reward` (and mirror it in
+  `train_from_episodes.py`).
+
 ## Live bridge (`azalea-bot/`)
 
 - [ ] **`azalea_bot` live features need a real-server check.** LSTM inference,

@@ -397,10 +397,15 @@ are deliberately **not** configurable.
 
 A few things stay a conscious simplification or a training-only choice:
 
-- **`max_look_delta` (3.0 rad/tick)** - vanilla has no per-tick limit on
-  the crosshair. This cap keeps the learned aim humanly reproducible
-  against a live server; it also rescales the yaw/pitch action head, so a
-  checkpoint doesn't transfer across values.
+- **`max_look_delta` (0.2 rad/tick, ~11 deg)** - vanilla has no per-tick
+  limit on the crosshair. This cap keeps the learned aim humanly
+  reproducible against a live server; it also rescales the yaw/pitch action
+  head, so a checkpoint doesn't transfer across values. The default is tight
+  on purpose: at the earlier 3.0 rad/tick (~170 deg) a policy learned to spin
+  at full speed and spam attack - it beat the scripted bot in the sim, but
+  the live legality guard (80 deg/tick rate cap, hold-after-big-turn) dropped
+  nearly every swing. Checkpoints keep the value they trained with
+  (`sim_constants`), so older ones still export and run correctly.
 - **Self-input has zero latency** - your ping ages your *view of others*
   and the *target pick* for your melee swing (against the target's
   round-trip-old position, like vanilla client-side hit registration), but
