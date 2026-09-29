@@ -395,6 +395,15 @@ evenly across the two starting sides, run continuously across
 into one Elo-scaled number per player. It only reads checkpoints - no
 training state is touched.
 
+A win rate can't tell a policy that faces and tracks its opponent from one
+that circle-strafes and lucks into hits (one beat the scripted bot ~86% in the
+sim and still walked in circles live). `python training/python/probe_aim.py`
+is the cheap check for that: it puts one enemy at a ring of bearings in front
+of a stationary bot and prints what the deterministic policy does - how often
+its yaw turns toward the enemy (a real tracker is ~100%, a constant spinner
+~50%), whether it attacks with the enemy dead ahead in reach, and its mean
+yaw. No sim or server needed; `--sample` uses sampled actions instead.
+
 ### Two transports, on purpose
 
 | link | transport | why |
