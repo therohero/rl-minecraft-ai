@@ -119,6 +119,9 @@ _SIM_CONFIG_OVERRIDES = {
     "reward_loss": ("reward", "loss"),
     "reward_sweep_penalty": ("reward", "sweep_penalty"),
     "reward_friendly_fire_penalty": ("reward", "friendly_fire_penalty"),
+    "reward_approach_per_block": ("reward", "approach_per_block"),
+    "reward_aim_bonus": ("reward", "aim_bonus"),
+    "reward_draw_penalty": ("reward", "draw_penalty"),
 }
 
 # Default `--num-arenas` is derived from the detected CPU count rather than
@@ -582,6 +585,30 @@ def main():
         type=float,
         default=None,
         help="reward subtracted per HP of damage dealt to a teammate (sim default 1.0)",
+    )
+    sim.add_argument(
+        "--reward-approach-per-block",
+        type=float,
+        default=None,
+        help="shaping (sim default 0 = off): reward per block the distance to the nearest enemy "
+        "shrinks each tick. Potential-based, so it telescopes - the total per match is bounded by "
+        "this x the starting distance and can't be farmed. Gives a policy that never lands a hit "
+        "a gradient toward the fight (try ~0.05).",
+    )
+    sim.add_argument(
+        "--reward-aim-bonus",
+        type=float,
+        default=None,
+        help="shaping (sim default 0 = off): potential = bonus x cos(angle between the look ray and "
+        "the enemy); the reward is its per-tick change (bounded by 2 x bonus per match). Teaches "
+        "'face the enemy' before hits are frequent enough to teach it (try ~0.05).",
+    )
+    sim.add_argument(
+        "--reward-draw-penalty",
+        type=float,
+        default=None,
+        help="reward subtracted when a match ends with no winner (equal team HP - nobody landed a "
+        "hit). Makes idle stand-offs cost something (sim default 0 = off; try ~2-5).",
     )
     parser.add_argument(
         "--ent-coef",

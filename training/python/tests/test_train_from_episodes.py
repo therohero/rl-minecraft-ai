@@ -11,7 +11,8 @@ import pytest
 
 import train_from_episodes as tfe
 
-_ARGS = SimpleNamespace(per_hp_dealt=1.0, per_hp_taken=1.0, win=100.0, loss=100.0)
+_ARGS = SimpleNamespace(per_hp_dealt=1.0, per_hp_taken=1.0, win=100.0, loss=100.0,
+                        approach_per_block=0.0, aim_bonus=0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -81,3 +82,25 @@ def test_legacy_session_without_outcome_uses_heuristic(tmp_path):
     path = _write(tmp_path, ticks)  # no outcome record
     _, _, _, _, reward, _ = tfe._load_session(path, scale=10.0)
     assert reward[-1] == pytest.approx(_ARGS.win)
+
+
+def test_approach_shaping_rewards_closing_distance(tmp_path, monkeypatch):
+    monkeypatch.setattr(tfe, "ARGS", SimpleNamespace(**{**vars(_ARGS), "approach_per_block": 0.1}))
+    def tick(t, dist):
+        enemies = [{"present": 1.0, "hp": 20.0, "rel_x": 0.0, "rel_y": 0.0, "rel_z": dist}]
+        return {"t": t, "kit": "sword", "target": "foe",
+                "obs": {"self_hp": 20.0, "enemies": enemies}, "action": {}}
+    path = _write(tmp_path, [tick(0, 6.0), tick(1, 5.0), tick(2, 4.0), tick(3, 4.0)])
+    reward = tfe._load_session(path, 1.0)[4]
+    np.testing.assert_allclose(reward[:3], [0.1, 0.1, 0.0], atol=1e-6)
+
+
+def test_aim_shaping_prefers_facing_the_enemy():
+    args = SimpleNamespace(**{**vars(_ARGS), "aim_bonus": 1.0})
+    tfe.ARGS = args
+    ahead = {"self_pitch": 0.0}
+    e_front = {"rel_x": 0.0, "rel_y": 0.72, "rel_z": 5.0}  # eye-level target dead ahead
+    e_side = {"rel_x": 5.0, "rel_y": 0.72, "rel_z": 0.0}
+    assert tfe._potential(ahead, e_front, True) == pytest.approx(1.0, abs=1e-6)
+    assert tfe._potential(ahead, e_side, True) == pytest.approx(0.0, abs=1e-6)
+    assert tfe._potential(ahead, e_front, False) == 0.0

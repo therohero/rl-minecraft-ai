@@ -344,6 +344,20 @@ recurrent `(h, c)` state between ticks as an `lstm_state` field on the
 `azalea-bot/README.md`'s "Recurrent (`--lstm`) checkpoints" section for the
 wire contract).
 
+### Reward shaping (opt-in)
+
+The base reward (damage dealt − damage taken, ±win/loss) is nearly silent for
+a policy that never lands a hit, so a from-scratch run can sit at
+`avg_return ≈ 0`, flat entropy and all-draw matches indefinitely. Three flags
+add a gradient without changing the game, all off by default:
+`--reward-approach-per-block` and `--reward-aim-bonus` are potential-based (the
+reward is the per-tick change of a potential on distance / aim vs the nearest
+enemy, so they telescope to a small bounded total per match and can't be
+farmed by oscillating), and `--reward-draw-penalty` charges an equal-HP
+timeout. Start small, e.g. `--reward-approach-per-block 0.05
+--reward-aim-bonus 0.05 --reward-draw-penalty 2`. `train_from_episodes.py`
+mirrors the two potentials (`--approach-per-block`, `--aim-bonus`).
+
 ### Terrain curriculum
 
 `--terrain-curriculum-updates N` ramps the sim's `terrain_max_amplitude`

@@ -570,6 +570,22 @@ pub struct RewardConfig {
     /// hitting or sweeping its own allies while keeping the mechanic
     /// vanilla-authentic.
     pub friendly_fire_penalty: f32,
+    /// Shaping (default 0 = off): reward per block the horizontal distance
+    /// to the nearest living enemy shrinks each tick (negative when
+    /// backing off). Potential-based (`phi = -approach_per_block * dist`),
+    /// so it telescopes over a match: the total can't exceed
+    /// `approach_per_block * starting distance`, and it can't be farmed by
+    /// oscillating. Gives a random policy a gradient toward the fight.
+    pub approach_per_block: f32,
+    /// Shaping (default 0 = off): potential `phi = aim_bonus * cos(angle
+    /// between the look ray and the direction from the eye to the nearest
+    /// living enemy's centre)`; the reward is its per-tick change. Same
+    /// telescoping bound (`<= 2 * aim_bonus` per match).
+    pub aim_bonus: f32,
+    /// Penalty (subtracted) when a match ends with no winner (a timeout on
+    /// exactly equal team HP - in practice nobody landed a hit). Turns the
+    /// "both sides idle" draw from a free outcome into a loss.
+    pub draw_penalty: f32,
 }
 
 impl Default for RewardConfig {
@@ -581,6 +597,9 @@ impl Default for RewardConfig {
             loss: 100.0,
             sweep_penalty: 0.0,
             friendly_fire_penalty: 1.0,
+            approach_per_block: 0.0,
+            aim_bonus: 0.0,
+            draw_penalty: 0.0,
         }
     }
 }

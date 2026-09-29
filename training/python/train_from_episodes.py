@@ -11,6 +11,8 @@ closes the loop:
      (the exact decode the inference server uses),
   2. reconstructs a per-tick reward from the observation stream, mirroring
      `training/sim/src/arena.rs::reward` - damage dealt minus damage taken,
+     plus the optional approach/aim shaping terms (`--approach-per-block`,
+     `--aim-bonus`; rebuilt from the observed, ping-lagged relative position),
      plus a terminal win/loss bonus from the logged outcome record (or, for
      older datasets without one, guessed from the observation stream),
   3. computes GAE advantages using the current checkpoint's value head,
@@ -57,6 +59,29 @@ def _find_sessions(root: str) -> list[str]:
     return hits
 
 
+# Mirrors sim physics::PLAYER_HEIGHT / EYE_HEIGHT (eye -> enemy-centre offset).
+_CENTRE_MINUS_EYE = 1.8 * 0.5 - 1.62
+
+
+def _potential(o: dict, e0, present: bool) -> float:
+    """Shaping potential (see sim `arena.rs::potential`) from the logged
+    observation: `-approach_per_block * horizontal dist + aim_bonus * cos(aim
+    error)` against enemy 0, 0 when it's gone. Rebuilt from the observed
+    (ping-lagged) relative position, so it only approximates the sim's true-
+    position value."""
+    if not present or (not ARGS.approach_per_block and not ARGS.aim_bonus):
+        return 0.0
+    rx, ry, rz = (float(e0.get(k, 0.0)) for k in ("rel_x", "rel_y", "rel_z"))
+    phi = -ARGS.approach_per_block * math.hypot(rx, rz)
+    if ARGS.aim_bonus:
+        pitch = float(o.get("self_pitch", 0.0))
+        ty = ry + _CENTRE_MINUS_EYE
+        norm = max(math.sqrt(rx * rx + ty * ty + rz * rz), 1e-3)
+        # obs coordinates are yaw-rotated, so the look ray is (0, -sin p, cos p)
+        phi += ARGS.aim_bonus * (-math.sin(pitch) * ty + math.cos(pitch) * rz) / norm
+    return phi
+
+
 def _atanh_clip(x: np.ndarray) -> np.ndarray:
     return np.arctanh(np.clip(x, -0.999, 0.999))
 
@@ -80,7 +105,7 @@ def _load_session(path: str, scale: float):
         return None
 
     obs_vecs, raw_cont, binary, slot = [], [], [], []
-    self_hp, enemy_hp, enemy_present = [], [], []
+    self_hp, enemy_hp, enemy_present, phi = [], [], [], []
     for r in rows:
         o = r["obs"]
         obs_vecs.append(features.observation_to_row(o))
@@ -105,6 +130,7 @@ def _load_session(path: str, scale: float):
         present = bool(e0 and float(e0.get("present", 1.0)) > 0.5)
         enemy_present.append(present)
         enemy_hp.append(float(e0.get("hp", 0.0)) if present else math.nan)
+        phi.append(_potential(o, e0, present))
 
     T = len(rows)
     reward = np.zeros(T, dtype=np.float32)
@@ -113,7 +139,7 @@ def _load_session(path: str, scale: float):
         dealt = 0.0
         if enemy_present[i] and enemy_present[i + 1]:
             dealt = max(0.0, enemy_hp[i] - enemy_hp[i + 1])
-        reward[i] = dealt * ARGS.per_hp_dealt - taken * ARGS.per_hp_taken
+        reward[i] = dealt * ARGS.per_hp_dealt - taken * ARGS.per_hp_taken + (phi[i + 1] - phi[i])
 
     done = np.zeros(T, dtype=np.float32)
     done[-1] = 1.0
@@ -181,6 +207,10 @@ def main():
     p.add_argument("--per-hp-taken", type=float, default=1.0)
     p.add_argument("--win", type=float, default=100.0)
     p.add_argument("--loss", type=float, default=100.0)
+    p.add_argument("--approach-per-block", type=float, default=0.0,
+                   help="mirror of the sim's reward.approach_per_block (use what you trained with)")
+    p.add_argument("--aim-bonus", type=float, default=0.0,
+                   help="mirror of the sim's reward.aim_bonus (use what you trained with)")
     p.add_argument("--dry-run", action="store_true", help="print stats, write nothing")
     ARGS = p.parse_args()
 
