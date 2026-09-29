@@ -366,7 +366,7 @@ the full list. Top-level fields, by area:
 | **enchants** | `enchants: { fire_aspect, flame, punch, knockback, knockback_resistance }` - per-player levels (0..1 for resistance), all 0 by default |
 | **latency (domain randomization)** | `min_ping_ms` / `max_ping_ms`, `ping_jitter_ms` |
 | **regularizer** | `max_look_delta` (the per-tick crosshair clamp) |
-| **reward weights** | the `reward` block |
+| **reward weights** | the `reward` block: `per_hp_dealt` / `per_hp_taken` / `win` / `loss` / `sweep_penalty` / `friendly_fire_penalty`, plus opt-in shaping (all 0 = off): `approach_per_block` and `aim_bonus` (potential-based - reward is the per-tick change of `-approach·dist + aim·cos(aim error)` vs the nearest living enemy, so they telescope and can't be farmed) and `draw_penalty` (subtracted when a match ends with equal team HP). Shaping changes only the scalar `reward`; the observation layout and `WIRE_VERSION` are unchanged |
 
 The `combat` block then holds the fine-grained numbers, grouped roughly as:
 

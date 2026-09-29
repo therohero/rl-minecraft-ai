@@ -4,6 +4,15 @@ Features and improvements to build. Derived from gaps and `// not implemented`
 notes in the code — prune / reprioritise freely. One branch per item (see
 `CLAUDE.md`), checked off only after the user has verified it.
 
+## Training (`training/`)
+
+- [ ] **Confirm reward shaping actually breaks the from-scratch plateau.** The
+  `--reward-approach-per-block` / `--reward-aim-bonus` / `--reward-draw-penalty`
+  flags are implemented and covered (sim unit tests, `smoke_train.py`), but
+  whether a real overnight run then leaves `avg_return ≈ 0` and starts winning
+  vs the scripted bot is empirical - tune the weights from the first few
+  thousand updates (the unshaped run stalled with entropy flat ~12, returns ~0).
+
 ## Live bridge (`azalea-bot/`)
 
 - [ ] **`azalea_bot` live features need a real-server check.** LSTM inference,

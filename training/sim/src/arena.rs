@@ -44,13 +44,22 @@ pub(crate) struct StepEvents {
     pub won: bool,
     pub lost: bool,
     pub done: bool,
+    /// Change in the approach / aim shaping potential over this tick
+    /// (already weighted by the reward config; 0 with shaping off).
+    pub shaping: f32,
 }
 
 impl StepEvents {
     pub(crate) fn reward(&self) -> f32 {
-        let r = cfg().reward;
+        self.reward_with(&cfg().reward)
+    }
+
+    /// `reward` under an explicit config (the global one is install-once, so
+    /// unit tests exercise the terms through this).
+    fn reward_with(&self, r: &crate::config::RewardConfig) -> f32 {
         let mut reward = self.damage_dealt * r.per_hp_dealt - self.damage_taken * r.per_hp_taken;
         reward -= self.friendly_damage * r.friendly_fire_penalty;
+        reward += self.shaping;
         if self.swept {
             reward -= r.sweep_penalty;
         }
@@ -60,8 +69,28 @@ impl StepEvents {
         if self.lost {
             reward -= r.loss;
         }
+        if self.done && !self.won && !self.lost {
+            reward -= r.draw_penalty;
+        }
         reward
     }
+}
+
+fn horizontal_dist(a: &Player, b: &Player) -> f32 {
+    ((a.pos.x - b.pos.x).powi(2) + (a.pos.z - b.pos.z).powi(2)).sqrt()
+}
+
+/// `-approach_per_block * dist + aim_bonus * cos(aim error)` of `me` against
+/// `enemy` (eye -> enemy centre; `feet-to-feet + (half height - eye height)`).
+fn potential(r: &crate::config::RewardConfig, me: &Player, enemy: &Player) -> f32 {
+    let d = Vec3::new(enemy.pos.x - me.pos.x, enemy.pos.y - me.pos.y, enemy.pos.z - me.pos.z);
+    let mut phi = -r.approach_per_block * d.horizontal_length();
+    if r.aim_bonus != 0.0 {
+        let to = Vec3::new(d.x, d.y + PLAYER_HEIGHT * 0.5 - EYE_HEIGHT, d.z);
+        let look = look_direction(me.yaw, me.pitch);
+        phi += r.aim_bonus * (look.x * to.x + look.y * to.y + look.z * to.z) / to.length().max(1e-3);
+    }
+    phi
 }
 
 impl Arena {
@@ -92,6 +121,20 @@ impl Arena {
         } else {
             self.team_size..2 * self.team_size
         }
+    }
+
+    /// Shaping potential of player `i`: `-approach_per_block * dist +
+    /// aim_bonus * cos(aim error)` against the nearest living enemy, 0 when
+    /// there is none (the terminal convention). Uses true (un-lagged)
+    /// positions. Callers skip it entirely when both weights are 0.
+    fn shaping_potential(&self, i: usize) -> f32 {
+        let me = &self.players[i];
+        let nearest = self
+            .players
+            .iter()
+            .filter(|p| p.team != me.team && p.alive())
+            .min_by(|a, b| horizontal_dist(me, a).total_cmp(&horizontal_dist(me, b)));
+        nearest.map_or(0.0, |enemy| potential(&cfg().reward, me, enemy))
     }
 
     fn team_alive(&self, team: u8) -> bool {
@@ -159,6 +202,9 @@ impl Arena {
         let eff = actions;
 
         let mut ev = vec![StepEvents::default(); n];
+
+        let shaped = cfg_.reward.approach_per_block != 0.0 || cfg_.reward.aim_bonus != 0.0;
+        let phi_before: Vec<f32> = if shaped { (0..n).map(|i| self.shaping_potential(i)).collect() } else { Vec::new() };
 
         // Tick down hurt-invulnerability.
         for p in &mut self.players {
@@ -262,6 +308,11 @@ impl Arena {
         self.time_left -= DT;
 
         self.decide_match_end(&mut ev);
+        if shaped {
+            for i in 0..n {
+                ev[i].shaping = self.shaping_potential(i) - phi_before[i];
+            }
+        }
 
         // Record this tick's public state for laggy observers to read back.
         for p in &mut self.players {
@@ -1341,5 +1392,38 @@ mod tests {
         assert_eq!(obs.projectiles.len(), cfg().max_observed_projectiles);
         assert_eq!(obs.block_view.len(), cfg().block_view_size * cfg().block_view_size);
         assert_eq!(obs.inventory.len(), ITEM_COUNT - 1);
+    }
+
+    fn shaping_cfg() -> crate::config::RewardConfig {
+        crate::config::RewardConfig { approach_per_block: 0.1, aim_bonus: 0.5, draw_penalty: 3.0, ..Default::default() }
+    }
+
+    #[test]
+    fn shaping_potential_rises_when_closer_and_when_facing() {
+        let r = shaping_cfg();
+        let arena = duel(combat::MAX_HP, combat::MAX_HP);
+        let (mut me, mut enemy) = (arena.players[0].clone(), arena.players[1].clone());
+        me.yaw = 0.0; // looks +z, toward the enemy at z=1
+        me.pitch = 0.0;
+        enemy.pos = Vec3::new(0.0, 0.0, 6.0);
+        let far = potential(&r, &me, &enemy);
+        enemy.pos = Vec3::new(0.0, 0.0, 2.0);
+        let near = potential(&r, &me, &enemy);
+        assert!(near > far, "closing 4 blocks raises phi ({far} -> {near})");
+        me.yaw = std::f32::consts::PI; // turned away
+        assert!(potential(&r, &me, &enemy) < near, "facing away lowers phi");
+        assert_eq!(potential(&Default::default(), &me, &enemy), 0.0, "off by default");
+    }
+
+    #[test]
+    fn shaping_and_draw_penalty_enter_the_reward_only_when_configured() {
+        let r = shaping_cfg();
+        let ev = StepEvents { shaping: 0.25, done: true, ..Default::default() };
+        assert_eq!(ev.reward_with(&r), 0.25 - 3.0, "a done step with no winner is a draw");
+        let win = StepEvents { done: true, won: true, ..Default::default() };
+        assert_eq!(win.reward_with(&r), r.win, "a win is not a draw");
+        let mid = StepEvents { shaping: 0.25, ..Default::default() };
+        assert_eq!(mid.reward_with(&r), 0.25, "no draw penalty mid-match");
+        assert_eq!(StepEvents { done: true, ..Default::default() }.reward_with(&Default::default()), 0.0);
     }
 }

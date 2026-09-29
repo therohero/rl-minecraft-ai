@@ -97,7 +97,7 @@ command below.
 
 `run_train_mod.sh` runs `training/python/train_from_episodes.py`: it
 reconstructs a per-tick reward from the observation stream (damage dealt −
-damage taken, ±win/loss, mirroring `training/sim/src/arena.rs`), then does a
+damage taken, ±win/loss, mirroring `training/sim/src/arena.rs`; pass `--approach-per-block` / `--aim-bonus` after `--` to mirror the sim's opt-in shaping if you trained with it - rebuilt from the ping-lagged observed enemy position, so approximate; the sim's `draw_penalty` isn't mirrored since the mod logs no draw outcome), then does a
 few epochs of **advantage-weighted regression** on top of the current
 checkpoint - a gentle nudge toward what worked in *real* fights, on
 *real*-server observations. The previous checkpoint is kept as
